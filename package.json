@@ -1,0 +1,21 @@
+{
+  "name": "@basuru/graphiti-memory",
+  "version": "1.0.0",
+  "description": "Graphiti temporal knowledge graph memory for OpenClaw",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.32.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0"
+  },
+  "openclaw": {
+    "extensions": ["./src/index.ts"]
+  }
+}

@@ -1,0 +1,52 @@
+# Graphiti MCP Server - Docker Compose
+# Using Neo4j + OpenRouter for both LLM and Embeddings
+# Built with custom fix for OpenRouter support
+
+services:
+  neo4j:
+    container_name: neo4j
+    image: neo4j:5.26.0
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_server_memory_heap_initial__size=512m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=512m
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "wget", "-O", "/dev/null", "http://localhost:7474"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  graphiti-mcp:
+    container_name: graphiti-mcp
+    image: graphiti-mcp:custom
+    env_file:
+      - .env
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      # Use config file for custom URL
+      - CONFIG_PATH=/app/mcp/config/config.yaml
+    volumes:
+      - ./graphiti/mcp_server/config/config-docker-neo4j.yaml:/app/mcp/config/config.yaml:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    command: ["uv", "run", "main.py"]
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

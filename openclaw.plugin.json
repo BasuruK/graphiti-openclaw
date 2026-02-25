@@ -1,0 +1,43 @@
+{
+  "id": "graphiti-memory",
+  "name": "Graphiti Memory",
+  "description": "Temporal knowledge graph memory for OpenClaw using Graphiti + Neo4j",
+  "kind": "memory",
+  "version": "1.0.0",
+  "author": "Basuru",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "endpoint": {
+        "type": "string",
+        "default": "http://localhost:8000",
+        "description": "Graphiti MCP server endpoint"
+      },
+      "groupId": {
+        "type": "string",
+        "default": "basuru",
+        "description": "Memory group ID for all conversations"
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically capture conversations to memory"
+      },
+      "autoRecall": {
+        "type": "boolean", 
+        "default": true,
+        "description": "Automatically recall relevant memories before each response"
+      },
+      "recallMaxFacts": {
+        "type": "number",
+        "default": 5,
+        "description": "Maximum facts to recall per query"
+      },
+      "minPromptLength": {
+        "type": "number",
+        "default": 10,
+        "description": "Minimum prompt length to trigger recall"
+      }
+    }
+  }
+}
