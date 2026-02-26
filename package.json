@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Graphiti temporal knowledge graph memory for OpenClaw",
   "type": "module",
-  "main": "src/index.ts",
+  "main": "index.ts",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch"
@@ -16,6 +16,6 @@
     "@types/node": "^20.0.0"
   },
   "openclaw": {
-    "extensions": ["./src/index.ts"]
+    "extensions": ["./index.ts"]
   }
 }
