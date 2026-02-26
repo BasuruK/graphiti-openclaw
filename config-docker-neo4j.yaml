@@ -23,4 +23,4 @@ database:
       database: neo4j
 
 graphiti:
-  group_id: basuru
+  group_id: ${GRAPHITI_GROUP_ID:-basuru}

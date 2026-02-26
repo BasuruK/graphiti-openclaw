@@ -8,14 +8,14 @@
 - Using FalkorDB (bundled with MCP image) - can switch to Neo4j
 
 ### Plugin Files ✅
-Created at `~/second-brain/06-Projects/graphiti-integration/plugin/`:
+Created in this repo:
 - `package.json` - npm package config
-- `tsconfig.json` - TypeScript config  
+- `tsconfig.json` - TypeScript config
 - `openclaw.plugin.json` - OpenClaw plugin manifest
-- `src/index.ts` - Plugin entry point
-- `src/client.ts` - Graphiti HTTP client
-- `src/tools.ts` - memory_recall, memory_store, memory_forget, memory_status
-- `src/hooks.ts` - auto-recall, auto-capture
+- `index.ts` - Plugin entry point
+- `client.ts` - Graphiti HTTP client
+- `tools.ts` - memory_recall, memory_store, memory_forget, memory_status
+- `hooks.ts` - auto-recall, auto-capture
 
 ## To Do
 
@@ -30,7 +30,7 @@ Created at `~/second-brain/06-Projects/graphiti-integration/plugin/`:
 curl http://localhost:8000/health
 
 # Neo4j browser
-open http://localhost:7474
+Visit http://localhost:7474 in your browser
 ```
 
 ## Next Steps
