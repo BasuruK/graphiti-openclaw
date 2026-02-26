@@ -1,0 +1,26 @@
+# Graphiti MCP Configuration for Neo4j
+
+server:
+  transport: http
+
+llm:
+  provider: openai
+  api_key: ${OPENAI_API_KEY}
+  base_url: ${OPENAI_API_BASE}
+  model: gpt-4o-mini
+
+embedder:
+  provider: voyage
+  api_key: ${VOYAGE_API_KEY}
+
+database:
+  provider: neo4j
+  providers:
+    neo4j:
+      uri: bolt://neo4j:7687
+      username: neo4j
+      password: password
+      database: neo4j
+
+graphiti:
+  group_id: basuru
