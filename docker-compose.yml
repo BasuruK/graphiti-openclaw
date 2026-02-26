@@ -10,7 +10,7 @@ services:
       - "7474:7474"
       - "7687:7687"
     environment:
-      - NEO4J_AUTH=neo4j/password
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-password}
       - NEO4J_server_memory_heap_initial__size=512m
       - NEO4J_server_memory_heap_max__size=1G
       - NEO4J_server_memory_pagecache_size=512m
@@ -36,7 +36,7 @@ services:
       # Use config file for custom URL
       - CONFIG_PATH=/app/mcp/config/config.yaml
     volumes:
-      - ./graphiti/mcp_server/config/config-docker-neo4j.yaml:/app/mcp/config/config.yaml:ro
+      - ./config/config-docker-neo4j.yaml:/app/mcp/config/config.yaml:ro
     ports:
       - "8000:8000"
     healthcheck:

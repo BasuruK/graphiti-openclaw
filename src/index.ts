@@ -27,7 +27,7 @@ export default {
       },
       groupId: {
         type: 'string',
-        default: 'basuru'
+        default: 'default'
       },
       autoCapture: {
         type: 'boolean',
@@ -56,7 +56,7 @@ export default {
     // Create Graphiti client
     const client = new GraphitiClient({
       endpoint: config.endpoint || 'http://localhost:8000',
-      groupId: config.groupId || 'basuru'
+      groupId: config.groupId || 'default'
     });
 
     // Verify connection
