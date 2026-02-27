@@ -15,7 +15,7 @@
       },
       "groupId": {
         "type": "string",
-        "default": "basuru",
+        "default": "default",
         "description": "Memory group ID for all conversations"
       },
       "autoCapture": {

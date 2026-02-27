@@ -14,7 +14,7 @@ import { registerTools } from './tools.js';
 import { registerHooks } from './hooks.js';
 
 export default {
-  id: 'graphiti-memory',
+  id: 'openclaw-graphiti-mem',
   name: 'Graphiti Memory',
   description: 'Temporal knowledge graph memory for OpenClaw using Graphiti + Neo4j',
   
@@ -49,7 +49,7 @@ export default {
   },
 
   async register(api: any) {
-    const config = api.pluginConfig;
+    const config = api.pluginConfig ?? {};
     
     console.log('[graphiti-memory] Registering plugin with config:', config);
 

@@ -1,6 +1,8 @@
 /**
- * Graphiti MCP HTTP Client
+ * Graphiti MCP Client using mcporter subprocess
  */
+
+import { spawn } from 'child_process';
 
 export interface GraphitiConfig {
   endpoint: string;
@@ -30,93 +32,87 @@ export interface HealthStatus {
 export class GraphitiClient {
   constructor(private config: GraphitiConfig) {}
 
-  private async callTool(toolName: string, params: Record<string, unknown>): Promise<unknown> {
-    const response = await fetch(`${this.config.endpoint}/mcp/`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/event-stream'
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: Date.now(),
-        method: 'tools/call',
-        params: {
-          name: toolName,
-          arguments: params,
-          sessionId: `oc-${Date.now()}`
+  private async mcporterCall(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const argsList = Object.entries(args).map(([k, v]) => `${k}=${v}`);
+      const proc = spawn('mcporter', ['call', `graphiti-memory.${toolName}`, ...argsList], {
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      
+      let stdout = '';
+      let stderr = '';
+      
+      proc.stdout.on('data', (d) => stdout += d);
+      proc.stderr.on('data', (d) => stderr += d);
+      
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          console.error(`[graphiti-memory] mcporter error: ${stderr}`);
+          reject(new Error(`mcporter failed: ${stderr}`));
+        } else {
+          try {
+            resolve(JSON.parse(stdout));
+          } catch (e) {
+            console.error(`[graphiti-memory] JSON parse error: ${stdout}`);
+            reject(e);
+          }
         }
-      })
+      });
     });
-
-    if (!response.ok) {
-      throw new Error(`Graphiti MCP error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    
-    if (data.error) {
-      throw new Error(`Graphiti MCP error: ${data.error.message}`);
-    }
-
-    return data.result?.content?.[0]?.text 
-      ? JSON.parse(data.result.content[0].text) 
-      : data.result;
   }
 
   async searchNodes(query: string, limit = 5): Promise<SearchResult[]> {
-    const result = await this.callTool('search_nodes', {
+    const result = await this.mcporterCall('search_nodes', {
       group_id: this.config.groupId,
       query,
       limit
-    });
-    return result as SearchResult[];
+    }) as { nodes: SearchResult[] };
+    return result.nodes;
   }
 
   async searchFacts(query: string, limit = 5): Promise<SearchResult[]> {
-    const result = await this.callTool('search_facts', {
+    const result = await this.mcporterCall('search_facts', {
       group_id: this.config.groupId,
       query,
       limit
-    });
-    return result as SearchResult[];
+    }) as { facts: SearchResult[] };
+    return result.facts;
   }
 
   async addEpisode(content: string, name?: string): Promise<{ uuid: string }> {
-    const result = await this.callTool('add_memory', {
+    const result = await this.mcporterCall('add_memory', {
       group_id: this.config.groupId,
       episode_body: content,
       name: name || `episode-${Date.now()}`
-    });
-    return result as { uuid: string };
+    }) as { uuid: string };
+    return result;
   }
 
   async getEpisodes(limit = 10): Promise<Episode[]> {
-    const result = await this.callTool('get_episodes', {
+    const result = await this.mcporterCall('get_episodes', {
       group_id: this.config.groupId,
       limit
-    });
-    return result as Episode[];
+    }) as { episodes: Episode[] };
+    return result.episodes;
   }
 
   async deleteEpisode(uuid: string): Promise<void> {
-    await this.callTool('delete_episode', {
+    await this.mcporterCall('delete_episode', {
       group_id: this.config.groupId,
       uuid
     });
   }
 
   async clearGraph(): Promise<void> {
-    await this.callTool('clear_graph', {
+    await this.mcporterCall('clear_graph', {
       group_id: this.config.groupId
     });
   }
 
   async healthCheck(): Promise<boolean> {
     try {
-      const response = await fetch(`${this.config.endpoint}/health`);
-      const data = await response.json() as HealthStatus;
-      return data.status === 'healthy';
+      const result = await this.mcporterCall('get_status', {}) as { status: string };
+      return result.status === 'ok';
     } catch {
       return false;
     }
