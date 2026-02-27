@@ -72,7 +72,16 @@ export class MemoryScorer {
    * Update configuration
    */
   updateConfig(partial: Partial<ScoringConfig>) {
-    this.config = { ...this.config, ...partial };
+    // Merge and validate
+    const merged = { ...this.config, ...partial };
+    
+    // Validate threshold invariant
+    if (merged.ephemeralThreshold >= merged.explicitThreshold) {
+      console.warn('[MemoryScorer] Invalid thresholds in updateConfig: ephemeral >= explicit. Ignoring update.');
+      return;
+    }
+    
+    this.config = merged;
   }
 
   /**

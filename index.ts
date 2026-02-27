@@ -103,9 +103,17 @@ export default {
   },
 
   async register(api: any) {
-    const config = api.pluginConfig ?? {};
+    const config = api?.pluginConfig ?? {};
     
-    console.log('[graphiti-memory] Registering plugin with config:', config);
+    // Safe logging - don't expose secrets
+    const safeConfig = {
+      endpoint: config.endpoint ? '[configured]' : 'http://localhost:8000',
+      groupId: config.groupId ?? 'default',
+      autoCapture: config.autoCapture,
+      autoRecall: config.autoRecall,
+      scoringEnabled: config.scoringEnabled
+    };
+    console.log('[graphiti-memory] Registering plugin with config:', safeConfig);
 
     // Create Graphiti client
     const client = new GraphitiClient({

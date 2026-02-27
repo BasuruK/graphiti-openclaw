@@ -5,7 +5,7 @@
  */
 
 import { GraphitiClient } from './client.js';
-import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig } from './memory-scorer.js';
+import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult } from './memory-scorer.js';
 
 /** Minimum message length to consider for capture */
 const MIN_MESSAGE_LENGTH = 20;
@@ -29,11 +29,11 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
   // Initialize Memory Scorer with config
   const scoringConfig: Partial<ScoringConfig> = {
     enabled: config.scoringEnabled !== false,
-    explicitThreshold: config.scoringExplicitThreshold || DEFAULT_SCORING_CONFIG.explicitThreshold,
-    ephemeralThreshold: config.scoringEphemeralThreshold || DEFAULT_SCORING_CONFIG.ephemeralThreshold,
-    defaultEphemeralHours: config.scoringEphemeralHours || DEFAULT_SCORING_CONFIG.defaultEphemeralHours,
-    defaultSilentDays: config.scoringSilentDays || DEFAULT_SCORING_CONFIG.defaultSilentDays,
-    cleanupIntervalHours: config.scoringCleanupHours || DEFAULT_SCORING_CONFIG.cleanupIntervalHours,
+    explicitThreshold: config.scoringExplicitThreshold ?? DEFAULT_SCORING_CONFIG.explicitThreshold,
+    ephemeralThreshold: config.scoringEphemeralThreshold ?? DEFAULT_SCORING_CONFIG.ephemeralThreshold,
+    defaultEphemeralHours: config.scoringEphemeralHours ?? DEFAULT_SCORING_CONFIG.defaultEphemeralHours,
+    defaultSilentDays: config.scoringSilentDays ?? DEFAULT_SCORING_CONFIG.defaultSilentDays,
+    cleanupIntervalHours: config.scoringCleanupHours ?? DEFAULT_SCORING_CONFIG.cleanupIntervalHours,
     notifyOnExplicit: config.scoringNotifyExplicit !== false,
     askBeforeDowngrade: config.scoringAskBeforeDowngrade !== false
   };
@@ -234,7 +234,7 @@ async function storeWithMetadata(
   client: GraphitiClient,
   segments: { content: string; role: 'user' | 'assistant' }[],
   sessionId: string,
-  scoreResult: any
+  scoreResult: ScoringResult
 ): Promise<void> {
   const conversation = segments
     .map(s => `${s.role}: ${s.content}`)
