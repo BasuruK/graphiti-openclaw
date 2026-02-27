@@ -19,9 +19,9 @@ Created in this repo:
 
 ## To Do
 
-1. **Fix MCP session ID** - Current Graphiti MCP requires session ID in different format
-2. **Configure for Neo4j** - Need to use separate Graphiti container that connects to Neo4j
-3. **Install plugin** - Copy to OpenClaw plugins directory
+1. ~~**Fix MCP session ID**~~ - DONE: Using mcporter for MCP calls
+2. ~~**Configure for Neo4j**~~ - DONE: Config updated with env vars
+3. ~~**Install plugin**~~ - DONE: Plugin loaded in OpenClaw
 
 ## Quick Test
 
@@ -35,8 +35,8 @@ Visit http://localhost:7474 in your browser
 
 ## Next Steps
 
-1. Ask Basuru for Voyage API key (or use OpenAI embeddings)
-2. Fix the MCP client session handling
+1. Set API keys via environment variables (VOYAGE_API_KEY, OPENAI_API_KEY)
+2. Configure Neo4j credentials via NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 3. Test tools manually
 4. Install plugin to OpenClaw
 

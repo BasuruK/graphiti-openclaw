@@ -17,10 +17,10 @@ database:
   provider: neo4j
   providers:
     neo4j:
-      uri: bolt://neo4j:7687
-      username: neo4j
-      password: password
-      database: neo4j
+      uri: ${NEO4J_URI}
+      username: ${NEO4J_USER}
+      password: ${NEO4J_PASSWORD}
+      database: ${NEO4J_DATABASE}
 
 graphiti:
-  group_id: ${GRAPHITI_GROUP_ID:-basuru}
+  group_id: ${GRAPHITI_GROUP_ID}
