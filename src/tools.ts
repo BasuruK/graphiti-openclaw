@@ -1,10 +1,22 @@
 /**
  * Graphiti Memory Tools for OpenClaw
+ * 
+ * Registers memory management tools that users can call directly:
+ * - memory_recall: Search memories
+ * - memory_store: Store important info
+ * - memory_forget: Delete a memory
+ * - memory_status: Check system health
  */
 
 import { Type } from '@sinclair/typebox';
 import { GraphitiClient } from './client.js';
 
+/**
+ * Register memory tools with the OpenClaw API
+ * @param api - OpenClaw plugin API
+ * @param client - Graphiti client instance  
+ * @param config - Plugin configuration
+ */
 export function registerTools(api: any, client: GraphitiClient, config: any) {
   
   // Memory Recall - Search memories

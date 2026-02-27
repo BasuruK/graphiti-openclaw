@@ -1,14 +1,29 @@
 /**
  * Graphiti Memory Hooks for OpenClaw
- * Auto-recall, auto-capture, and adaptive importance scoring
+ * 
+ * Provides auto-recall, auto-capture, and adaptive importance scoring functionality.
  */
 
 import { GraphitiClient } from './client.js';
 import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig } from './memory-scorer.js';
 
+/** Minimum message length to consider for capture */
 const MIN_MESSAGE_LENGTH = 20;
+/** Maximum messages to capture per turn */
 const MAX_CAPTURE_MESSAGES = 15;
 
+/**
+ * Register memory hooks with the OpenClaw API
+ * 
+ * Registers three hooks:
+ * - before_agent_start: Auto-recall relevant memories
+ * - agent_end: Auto-capture with importance scoring
+ * - heartbeat: Periodic memory consolidation/cleanup
+ * 
+ * @param api - OpenClaw plugin API
+ * @param client - Graphiti client instance
+ * @param config - Plugin configuration
+ */
 export function registerHooks(api: any, client: GraphitiClient, config: any) {
   
   // Initialize Memory Scorer with config
@@ -201,8 +216,16 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
 }
 
 /**
- * Helper to store conversation with scoring metadata
- * This would be enhanced to actually store the importance metadata to Graphiti
+ * Store conversation with importance scoring metadata
+ * 
+ * Stores the conversation to Graphiti and logs the scoring metadata.
+ * In production, this would also store the importance/tier properties
+ * to the Graphiti node itself.
+ * 
+ * @param client - Graphiti client
+ * @param segments - Conversation segments
+ * @param sessionId - Current session ID
+ * @param scoreResult - Importance scoring result
  */
 async function storeWithMetadata(
   client: GraphitiClient,
