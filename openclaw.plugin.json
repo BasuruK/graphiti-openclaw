@@ -1,9 +1,9 @@
 {
   "id": "graphiti-memory",
   "name": "Graphiti Memory",
-  "description": "Temporal knowledge graph memory for OpenClaw using Graphiti + Neo4j",
+  "description": "Temporal knowledge graph memory for OpenClaw with adaptive importance scoring (Memory Cortex)",
   "kind": "memory",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Basuru",
   "configSchema": {
     "type": "object",
@@ -37,6 +37,46 @@
         "type": "number",
         "default": 10,
         "description": "Minimum prompt length to trigger recall"
+      },
+      "scoringEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable adaptive importance scoring"
+      },
+      "scoringExplicitThreshold": {
+        "type": "number",
+        "default": 8,
+        "description": "Score >= this triggers explicit storage (user notification)"
+      },
+      "scoringEphemeralThreshold": {
+        "type": "number",
+        "default": 4,
+        "description": "Score < this triggers ephemeral (temp) storage"
+      },
+      "scoringEphemeralHours": {
+        "type": "number",
+        "default": 72,
+        "description": "Hours before ephemeral memories auto-expire"
+      },
+      "scoringSilentDays": {
+        "type": "number",
+        "default": 30,
+        "description": "Days before silent memories need reinforcement"
+      },
+      "scoringCleanupHours": {
+        "type": "number",
+        "default": 12,
+        "description": "How often to run cleanup via heartbeat (hours)"
+      },
+      "scoringNotifyExplicit": {
+        "type": "boolean",
+        "default": true,
+        "description": "Notify user when storing explicit importance memories"
+      },
+      "scoringAskBeforeDowngrade": {
+        "type": "boolean",
+        "default": true,
+        "description": "Ask user before downgrading memory importance"
       }
     }
   }
