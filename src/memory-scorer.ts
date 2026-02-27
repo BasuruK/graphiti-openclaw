@@ -55,7 +55,17 @@ export class MemoryScorer {
 
   constructor(client: GraphitiClient, config: Partial<ScoringConfig> = {}) {
     this.client = client;
-    this.config = { ...DEFAULT_SCORING_CONFIG, ...config };
+    
+    // Merge with defaults and validate thresholds
+    const merged = { ...DEFAULT_SCORING_CONFIG, ...config };
+    
+    // Validate: ephemeralThreshold must be < explicitThreshold
+    if (merged.ephemeralThreshold >= merged.explicitThreshold) {
+      console.warn('[MemoryScorer] Invalid thresholds: ephemeral >= explicit. Adjusting...');
+      merged.ephemeralThreshold = Math.min(merged.ephemeralThreshold, merged.explicitThreshold - 1);
+    }
+    
+    this.config = merged;
   }
 
   /**

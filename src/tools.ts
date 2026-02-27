@@ -30,7 +30,11 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
     }),
     async execute(toolCallId: string, params: { query: string; limit?: number }) {
       try {
-        const results = await client.searchNodes(params.query, params.limit || 5);
+        // Clamp limit to prevent expensive queries
+        const rawLimit = params.limit ?? 5;
+        const limit = Math.min(Math.max(rawLimit, 1), 20);
+        
+        const results = await client.searchNodes(params.query, limit);
         
         if (!results || results.length === 0) {
           return {

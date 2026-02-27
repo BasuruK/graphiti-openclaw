@@ -61,37 +61,60 @@ export class GraphitiClient {
    * @returns Parsed response from the server
    */
   private async callTool(toolName: string, params: Record<string, unknown>): Promise<unknown> {
-    const response = await fetch(`${this.config.endpoint}/mcp/`, {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/event-stream'
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: Date.now(),
-        method: 'tools/call',
-        params: {
-          name: toolName,
-          arguments: params,
-          sessionId: `oc-${Date.now()}`
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30s timeout
+
+    try {
+      const response = await fetch(`${this.config.endpoint}/mcp/`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/event-stream'
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: Date.now(),
+          method: 'tools/call',
+          params: {
+            name: toolName,
+            arguments: params,
+            sessionId: `oc-${Date.now()}`
+          }
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`Graphiti MCP error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      
+      if (data.error) {
+        throw new Error(`Graphiti MCP error: ${data.error.message}`);
+      }
+
+      // Guard: Check if content text is JSON or plain text
+      const text = data.result?.content?.[0]?.text;
+      if (typeof text === 'string') {
+        try {
+          return JSON.parse(text);
+        } catch {
+          // Return as-is if not valid JSON
+          return text;
         }
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Graphiti MCP error: ${response.status} ${response.statusText}`);
+      }
+      
+      return data.result;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error('Graphiti MCP request timed out after 30 seconds');
+      }
+      throw err;
     }
-
-    const data = await response.json();
-    
-    if (data.error) {
-      throw new Error(`Graphiti MCP error: ${data.error.message}`);
-    }
-
-    return data.result?.content?.[0]?.text 
-      ? JSON.parse(data.result.content[0].text) 
-      : data.result;
   }
 
   /**

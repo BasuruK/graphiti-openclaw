@@ -122,6 +122,9 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
         messageCount++;
       }
 
+      // Restore chronological order (oldest first)
+      conversationSegments.reverse();
+
       if (conversationSegments.length === 0) {
         console.log('[graphiti-memory] Auto-capture: No meaningful messages to capture');
         return;

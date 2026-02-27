@@ -103,7 +103,7 @@ export default {
   },
 
   async register(api: any) {
-    const config = api.pluginConfig;
+    const config = api.pluginConfig ?? {};
     
     console.log('[graphiti-memory] Registering plugin with config:', config);
 
