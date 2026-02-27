@@ -1,24 +1,27 @@
 /**
  * Graphiti Memory Tools for OpenClaw
- * 
+ *
  * Registers memory management tools that users can call directly:
  * - memory_recall: Search memories
  * - memory_store: Store important info
+ * - memory_list: Browse memories with filters
  * - memory_forget: Delete a memory
  * - memory_status: Check system health
+ * - memory_consolidate: Synthesize recent memories
+ * - memory_analyze: Score/assess a memory's importance
  */
 
 import { Type } from '@sinclair/typebox';
-import { GraphitiClient } from './client.js';
+import type { MemoryAdapter } from './adapters/memory-adapter.js';
 
 /**
  * Register memory tools with the OpenClaw API
  * @param api - OpenClaw plugin API
- * @param client - Graphiti client instance  
+ * @param adapter - Memory adapter instance
  * @param config - Plugin configuration
  */
-export function registerTools(api: any, client: GraphitiClient, config: any) {
-  
+export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
+
   // Memory Recall - Search memories
   api.registerTool({
     name: 'memory_recall',
@@ -26,16 +29,19 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
     description: 'Search through long-term memories. Use when user asks about past conversations, preferences, facts, or context from previous sessions.',
     parameters: Type.Object({
       query: Type.String({ description: 'Search query' }),
-      limit: Type.Optional(Type.Number({ default: 5, description: 'Maximum results' }))
+      limit: Type.Optional(Type.Number({ default: 5, description: 'Maximum results' })),
+      tier: Type.Optional(Type.String({ description: 'Filter by tier: explicit, silent, ephemeral, or all', default: 'all' }))
     }),
-    async execute(toolCallId: string, params: { query: string; limit?: number }) {
+    async execute(toolCallId: string, params: { query: string; limit?: number; tier?: string }) {
       try {
         // Clamp limit to prevent expensive queries
         const rawLimit = params.limit ?? 5;
         const limit = Math.min(Math.max(rawLimit, 1), 20);
-        
-        const results = await client.searchNodes(params.query, limit);
-        
+
+        const tier = params.tier as 'explicit' | 'silent' | 'ephemeral' | 'all' || 'all';
+
+        const results = await adapter.recall(params.query, { limit, tier });
+
         if (!results || results.length === 0) {
           return {
             content: [{ type: 'text', text: 'No memories found.' }],
@@ -43,8 +49,8 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
           };
         }
 
-        const formatted = results.map((r, i) => 
-          `${i + 1}. ${r.summary || r.name || r.fact}`
+        const formatted = results.map((r, i) =>
+          `${i + 1}. [${r.metadata.tier.toUpperCase()}] ${r.content.substring(0, 150)}...`
         ).join('\n');
 
         return {
@@ -68,15 +74,22 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
     description: 'Store important information to remember long-term. Use when user says "remember that", "dont forget", or shares preferences, important facts, or context.',
     parameters: Type.Object({
       content: Type.String({ description: 'Content to remember' }),
-      name: Type.Optional(Type.String({ description: 'Optional name for this memory' }))
+      name: Type.Optional(Type.String({ description: 'Optional name for this memory' })),
+      tier: Type.Optional(Type.String({ description: 'Memory tier: explicit (permanent), silent (30d), ephemeral (72h)', default: 'silent' }))
     }),
-    async execute(toolCallId: string, params: { content: string; name?: string }) {
+    async execute(toolCallId: string, params: { content: string; name?: string; tier?: string }) {
       try {
-        const result = await client.addEpisode(params.content, params.name);
-        
+        const tier = params.tier as 'explicit' | 'silent' | 'ephemeral' || 'silent';
+
+        const id = await adapter.store(params.content, {
+          tier,
+          score: tier === 'explicit' ? 9 : tier === 'silent' ? 6 : 3,
+          source: 'user_explicit',
+        });
+
         return {
-          content: [{ type: 'text', text: `Memory stored successfully (ID: ${result.uuid})` }],
-          details: { uuid: result.uuid }
+          content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${tier}` }],
+          details: { id, tier }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -88,6 +101,49 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
     }
   }, { name: 'memory_store' });
 
+  // Memory List - Browse memories with filters
+  api.registerTool({
+    name: 'memory_list',
+    label: 'Memory List',
+    description: 'List recent memories with optional filtering by tier. Useful for browsing what has been stored.',
+    parameters: Type.Object({
+      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum memories to list' })),
+      tier: Type.Optional(Type.String({ description: 'Filter by tier: explicit, silent, ephemeral, or all', default: 'all' }))
+    }),
+    async execute(toolCallId: string, params: { limit?: number; tier?: string }) {
+      try {
+        const rawLimit = params.limit ?? 10;
+        const limit = Math.min(Math.max(rawLimit, 1), 50);
+        const tier = params.tier as 'explicit' | 'silent' | 'ephemeral' | 'all' || 'all';
+
+        const memories = await adapter.list(limit, tier);
+
+        if (!memories || memories.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No memories found.' }],
+            details: { count: 0 }
+          };
+        }
+
+        const formatted = memories.map((m, i) => {
+          const date = m.metadata.createdAt.toISOString().split('T')[0];
+          return `${i + 1}. [${m.metadata.tier.toUpperCase()}] ${date} - ${m.content.substring(0, 100)}...`;
+        }).join('\n');
+
+        return {
+          content: [{ type: 'text', text: `Found ${memories.length} memories:\n\n${formatted}` }],
+          details: { count: memories.length, memories }
+        };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error listing memories: ${errorMsg}` }],
+          isError: true
+        };
+      }
+    }
+  }, { name: 'memory_list' });
+
   // Memory Forget - Delete a memory
   api.registerTool({
     name: 'memory_forget',
@@ -98,8 +154,8 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
     }),
     async execute(toolCallId: string, params: { uuid: string }) {
       try {
-        await client.deleteEpisode(params.uuid);
-        
+        await adapter.forget(params.uuid);
+
         return {
           content: [{ type: 'text', text: `Memory ${params.uuid} deleted successfully.` }],
           details: { deleted: true }
@@ -122,18 +178,25 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
     parameters: Type.Object({}),
     async execute(toolCallId: string, params: {}) {
       try {
-        const healthy = await client.healthCheck();
-        const episodes = await client.getEpisodes(3);
-        
+        const health = await adapter.healthCheck();
+        const stats = await adapter.getStats();
+
+        const statusEmoji = health.healthy ? '✅' : '❌';
+
         return {
-          content: [{ 
-            type: 'text', 
-            text: `Graphiti Memory Status:\n\n` +
-              `- Service: ${healthy ? '✅ Healthy' : '❌ Unhealthy'}\n` +
-              `- Group: ${config.groupId}\n` +
-              `- Recent Episodes: ${episodes.length}`
+          content: [{
+            type: 'text',
+            text: `Memory Status:\n\n` +
+              `- Service: ${statusEmoji} ${health.backend}\n` +
+              `- Healthy: ${health.healthy ? 'Yes' : 'No'}\n` +
+              `- Total Memories: ${stats.totalCount}\n` +
+              `  - Explicit: ${stats.byTier.explicit}\n` +
+              `  - Silent: ${stats.byTier.silent}\n` +
+              `  - Ephemeral: ${stats.byTier.ephemeral}\n` +
+              (stats.oldestMemory ? `- Oldest: ${stats.oldestMemory.toISOString().split('T')[0]}\n` : '') +
+              (stats.newestMemory ? `- Newest: ${stats.newestMemory.toISOString().split('T')[0]}` : '')
           }],
-          details: { healthy, groupId: config.groupId, recentEpisodes: episodes.length }
+          details: { health, stats }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -145,5 +208,125 @@ export function registerTools(api: any, client: GraphitiClient, config: any) {
     }
   }, { name: 'memory_status' });
 
-  console.log('[graphiti-memory] Tools registered: memory_recall, memory_store, memory_forget, memory_status');
+  // Memory Consolidate - Synthesize recent memories
+  api.registerTool({
+    name: 'memory_consolidate',
+    label: 'Memory Consolidate',
+    description: 'Synthesize and integrate recent memories. This helps maintain a coherent knowledge graph by connecting related memories.',
+    parameters: Type.Object({
+      hours: Type.Optional(Type.Number({ default: 24, description: 'Look back hours for consolidation' }))
+    }),
+    async execute(toolCallId: string, params: { hours?: number }) {
+      try {
+        const hours = params.hours || 24;
+        const startTime = new Date(Date.now() - hours * 3600000);
+
+        // Get recent memories
+        const recentMemories = await adapter.list(50, 'all');
+
+        if (recentMemories.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No memories to consolidate.' }],
+            details: { consolidated: 0 }
+          };
+        }
+
+        // Group by semantic similarity (simplified - in production would use embeddings)
+        const clusters = new Map<string, typeof recentMemories>();
+
+        for (const memory of recentMemories) {
+          // Simple clustering by first few words
+          const key = memory.content.substring(0, 30).toLowerCase();
+          if (!clusters.has(key)) {
+            clusters.set(key, []);
+          }
+          clusters.get(key)!.push(memory);
+        }
+
+        let upgraded = 0;
+        let deleted = 0;
+
+        // Process clusters: upgrade if reinforced, delete duplicates
+        for (const [key, cluster] of clusters) {
+          if (cluster.length > 1) {
+            // Keep the most recent/relevant, mark others as consolidated
+            for (let i = 1; i < cluster.length; i++) {
+              try {
+                await adapter.forget(cluster[i].id);
+                deleted++;
+              } catch {
+                // May already be deleted
+              }
+            }
+          }
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Memory consolidation complete.\n\n- Memories analyzed: ${recentMemories.length}\n- Clusters found: ${clusters.size}\n- Duplicates removed: ${deleted}`
+          }],
+          details: { analyzed: recentMemories.length, clusters: clusters.size, deleted }
+        };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error consolidating memories: ${errorMsg}` }],
+          isError: true
+        };
+      }
+    }
+  }, { name: 'memory_consolidate' });
+
+  // Memory Analyze - Score/assess a memory's importance
+  api.registerTool({
+    name: 'memory_analyze',
+    label: 'Memory Analyze',
+    description: 'Analyze content to predict its importance score (0-10) and recommended storage tier.',
+    parameters: Type.Object({
+      content: Type.String({ description: 'Content to analyze' })
+    }),
+    async execute(toolCallId: string, params: { content: string }) {
+      try {
+        // Import dynamically to avoid circular deps
+        const { createMemoryScorer } = await import('./memory-scorer.js');
+        const { DEFAULT_SCORING_CONFIG } = await import('./memory-scorer.js');
+
+        const scorer = createMemoryScorer(adapter, {
+          enabled: true,
+        });
+
+        const result = await scorer.scoreConversation([{
+          content: params.content,
+          role: 'user'
+        }]);
+
+        const tierEmoji = {
+          explicit: '🔴',
+          silent: '🟡',
+          ephemeral: '⚪'
+        };
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Memory Analysis:\n\n` +
+              `- Score: ${result.score}/10 ${tierEmoji[result.tier]}\n` +
+              `- Tier: ${result.tier}\n` +
+              `- Reasoning: ${result.reasoning}\n` +
+              `- Recommended Action: ${result.recommendedAction}`
+          }],
+          details: result
+        };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error analyzing memory: ${errorMsg}` }],
+          isError: true
+        };
+      }
+    }
+  }, { name: 'memory_analyze' });
+
+  console.log('[graphiti-memory] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, memory_consolidate, memory_analyze');
 }

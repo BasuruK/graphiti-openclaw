@@ -1,11 +1,11 @@
 /**
  * Memory Scorer - Adaptive Importance Scoring for Autonomous Memory
- * 
+ *
  * This module analyzes conversation content and assigns importance scores,
  * determining whether memories should be stored as Explicit, Silent, or Ephemeral.
  */
 
-import { GraphitiClient } from './client.js';
+import type { MemoryAdapter } from './adapters/memory-adapter.js';
 
 export interface ScoringConfig {
   enabled: boolean;
@@ -44,27 +44,38 @@ export interface ConversationSegment {
   hasExplicitMarker?: boolean;     // "remember", "important", "don't forget"
 }
 
+interface ScoringFactors {
+  explicit_emphasis: number;
+  emotional_weight: number;
+  future_utility: number;
+  repetition: number;
+  time_sensitivity: number;
+  context_anchoring: number;
+  novelty: number;
+}
+
 /**
  * Memory Scorer Class
- * 
+ *
  * Analyzes conversation segments and assigns importance scores.
+ * Now uses MemoryAdapter interface for backend-agnostic operation.
  */
 export class MemoryScorer {
-  private client: GraphitiClient;
+  private adapter: MemoryAdapter;
   private config: ScoringConfig;
 
-  constructor(client: GraphitiClient, config: Partial<ScoringConfig> = {}) {
-    this.client = client;
-    
+  constructor(adapter: MemoryAdapter, config: Partial<ScoringConfig> = {}) {
+    this.adapter = adapter;
+
     // Merge with defaults and validate thresholds
     const merged = { ...DEFAULT_SCORING_CONFIG, ...config };
-    
+
     // Validate: ephemeralThreshold must be < explicitThreshold
     if (merged.ephemeralThreshold >= merged.explicitThreshold) {
       console.warn('[MemoryScorer] Invalid thresholds: ephemeral >= explicit. Adjusting...');
       merged.ephemeralThreshold = Math.min(merged.ephemeralThreshold, merged.explicitThreshold - 1);
     }
-    
+
     this.config = merged;
   }
 
@@ -74,13 +85,13 @@ export class MemoryScorer {
   updateConfig(partial: Partial<ScoringConfig>) {
     // Merge and validate
     const merged = { ...this.config, ...partial };
-    
+
     // Validate threshold invariant
     if (merged.ephemeralThreshold >= merged.explicitThreshold) {
       console.warn('[MemoryScorer] Invalid thresholds in updateConfig: ephemeral >= explicit. Ignoring update.');
       return;
     }
-    
+
     this.config = merged;
   }
 
@@ -98,7 +109,7 @@ export class MemoryScorer {
     }
 
     const fullContent = segments.map(s => s.content).join('\n');
-    
+
     // Check for explicit markers
     const hasExplicit = this.detectExplicitMarkers(fullContent);
     const emotionalWeight = this.detectEmotionalContent(fullContent);
@@ -106,12 +117,13 @@ export class MemoryScorer {
     const contextAnchoring = await this.checkContextAnchoring(fullContent);
     const timeSensitivity = this.detectTimeSensitivity(fullContent);
     const novelty = await this.checkNovelty(fullContent);
+    const futureUtility = await this.predictFutureUtility(fullContent, segments);
 
     // Calculate weighted score
     let score = this.calculateWeightedScore({
       explicit_emphasis: hasExplicit ? 10 : 0,
       emotional_weight: emotionalWeight,
-      future_utility: 5, // Default, will be refined by LLM
+      future_utility: futureUtility,
       repetition: repetitionScore,
       time_sensitivity: timeSensitivity,
       context_anchoring: contextAnchoring,
@@ -134,7 +146,8 @@ export class MemoryScorer {
         repetitionScore,
         contextAnchoring,
         timeSensitivity,
-        novelty
+        novelty,
+        futureUtility
       }),
       expiresInHours,
       recommendedAction
@@ -157,7 +170,13 @@ export class MemoryScorer {
       'always remember',
       'will need this',
       'save this',
-      'store this'
+      'store this',
+      'always',
+      'never',
+      'must remember',
+      'critical',
+      'vital',
+      'essential'
     ];
 
     const lowerContent = content.toLowerCase();
@@ -169,9 +188,10 @@ export class MemoryScorer {
    */
   private detectEmotionalContent(content: string): number {
     const emotionalMarkers = {
-      positive: ['love', 'excited', 'happy', 'great', 'awesome', 'amazing', 'fantastic'],
-      negative: ['hate', 'frustrated', 'annoyed', 'angry', 'upset', 'disappointed'],
-      preference: ['prefer', 'like', 'dislike', 'want', 'need', 'wish', 'hope']
+      positive: ['love', 'excited', 'happy', 'great', 'awesome', 'amazing', 'fantastic', 'wonderful'],
+      negative: ['hate', 'frustrated', 'annoyed', 'angry', 'upset', 'disappointed', 'sad', 'terrible'],
+      preference: ['prefer', 'like', 'dislike', 'want', 'need', 'wish', 'hope', 'love', 'hate'],
+      concern: ['worried', 'concerned', 'afraid', 'scared', 'nervous']
     };
 
     const lowerContent = content.toLowerCase();
@@ -184,6 +204,9 @@ export class MemoryScorer {
     for (const word of emotionalMarkers.negative) {
       if (lowerContent.includes(word)) score += 2;
     }
+    for (const word of emotionalMarkers.concern) {
+      if (lowerContent.includes(word)) score += 3;
+    }
     for (const word of emotionalMarkers.positive) {
       if (lowerContent.includes(word)) score += 1;
     }
@@ -193,64 +216,173 @@ export class MemoryScorer {
 
   /**
    * Check if similar content has been mentioned before
+   * FIXED: Actually queries the adapter for existing memories
    */
   private async checkRepetition(segments: ConversationSegment[]): Promise<number> {
-    // This would query Graphiti for similar content
-    // For now, return a default score
-    // TODO: Implement actual repetition detection via Graphiti search
-    return 3;
+    const content = segments.map(s => s.content).join(' ');
+    if (!content || content.length < 20) return 0;
+
+    try {
+      const results = await this.adapter.recall(content, { limit: 10 });
+      if (results.length === 0) return 0;
+
+      // Calculate semantic similarity
+      // More similar memories = more repetition = lower importance for new storage
+      // Return score 0-10 (high repetition = high score)
+      const similaritySum = results.reduce((sum, r) => sum + r.relevanceScore, 0);
+      const avgSimilarity = similaritySum / results.length;
+
+      return Math.round(avgSimilarity * 10);
+    } catch (err) {
+      console.warn('[MemoryScorer] Repetition check failed:', err);
+      return 3; // Default middle score on error
+    }
   }
 
   /**
    * Check if content connects to existing high-value memories
+   * FIXED: Actually queries the adapter
    */
   private async checkContextAnchoring(content: string): Promise<number> {
-    // This would query Graphiti for related existing memories
-    // TODO: Implement actual context anchoring via Graphiti search
-    return 3;
+    if (!content || content.length < 20) return 0;
+
+    try {
+      const results = await this.adapter.recall(content, { limit: 10 });
+      if (results.length === 0) return 0;
+
+      // Check for explicit tier memories (high-value)
+      const explicitCount = results.filter(r => r.metadata.tier === 'explicit').length;
+      const silentCount = results.filter(r => r.metadata.tier === 'silent').length;
+
+      // More related memories = stronger anchoring = higher importance
+      return Math.min(explicitCount * 3 + silentCount * 2, 10);
+    } catch (err) {
+      console.warn('[MemoryScorer] Context anchoring check failed:', err);
+      return 3;
+    }
   }
 
   /**
    * Detect time-sensitive information
    */
   private detectTimeSensitivity(content: string): number {
-    const timeMarkers = [
-      'tomorrow', 'today', 'next week', 'upcoming', 'deadline',
-      'soon', 'asap', 'urgent', 'by monday', 'by friday',
-      'this month', 'next month', 'schedule', 'remind me'
-    ];
+    const timeMarkers = {
+      urgent: ['urgent', 'asap', 'immediately', 'right now', 'emergency', 'critical'],
+      deadline: ['deadline', 'due', 'by monday', 'by friday', 'by tomorrow', 'end of day', 'eod'],
+      future: ['tomorrow', 'today', 'next week', 'upcoming', 'soon', 'this month', 'next month', 'schedule', 'remind me'],
+      recurring: ['every week', 'daily', 'weekly', 'monthly', 'recurring', 'always']
+    };
 
     const lowerContent = content.toLowerCase();
     let score = 0;
 
-    for (const marker of timeMarkers) {
-      if (lowerContent.includes(marker)) score += 2;
+    for (const word of timeMarkers.urgent) {
+      if (lowerContent.includes(word)) score += 3;
+    }
+    for (const word of timeMarkers.deadline) {
+      if (lowerContent.includes(word)) score += 3;
+    }
+    for (const word of timeMarkers.future) {
+      if (lowerContent.includes(word)) score += 2;
+    }
+    for (const word of timeMarkers.recurring) {
+      if (lowerContent.includes(word)) score += 2;
     }
 
     return Math.min(score, 10);
   }
 
   /**
-   * Check if content is novel or already known
+   * FIXED: Check if content is novel or already known
+   * Now actually compares against existing memories
    */
   private async checkNovelty(content: string): Promise<number> {
-    // This would compare against existing memories
-    // Default to medium-high novelty
-    return 6;
+    if (!content || content.length < 20) return 5;
+
+    try {
+      const results = await this.adapter.recall(content, { limit: 5 });
+      if (results.length === 0) return 10; // Completely novel
+
+      // Calculate average similarity
+      const similaritySum = results.reduce((sum, r) => sum + r.relevanceScore, 0);
+      const avgSimilarity = similaritySum / results.length;
+
+      // Novelty is inverse of similarity
+      return Math.round((1 - avgSimilarity) * 10);
+    } catch (err) {
+      console.warn('[MemoryScorer] Novelty check failed:', err);
+      return 5; // Default to medium novelty
+    }
+  }
+
+  /**
+   * FIXED: Predict future utility of content
+   * Analyzes content for indicators that it will be useful in the future
+   */
+  private async predictFutureUtility(
+    content: string,
+    segments: ConversationSegment[]
+  ): Promise<number> {
+    if (!content || content.length < 20) return 5;
+
+    const utilityIndicators = {
+      high: [
+        'preference', 'prefer', 'like', 'dislike', 'love', 'hate',
+        'password', 'credentials', 'login', 'account',
+        'project', 'goal', 'objective',
+        'meeting', 'schedule', 'appointment',
+        'configuration', 'config', 'setup', 'install'
+      ],
+      medium: [
+        'information', 'fact', 'detail', 'remember', 'note',
+        'work', 'task', 'todo',
+        'learn', 'study', 'research'
+      ],
+      low: [
+        'hello', 'hi', 'thanks', 'thank you', 'okay', 'sure',
+        'question', 'what', 'how', 'why'
+      ]
+    };
+
+    const lowerContent = content.toLowerCase();
+    let score = 5;
+
+    // Check for high-utility indicators
+    for (const word of utilityIndicators.high) {
+      if (lowerContent.includes(word)) {
+        score += 2;
+        break;
+      }
+    }
+
+    // Check for medium-utility indicators
+    for (const word of utilityIndicators.medium) {
+      if (lowerContent.includes(word)) {
+        score += 1;
+        break;
+      }
+    }
+
+    // Check for low-utility indicators
+    for (const word of utilityIndicators.low) {
+      if (lowerContent === word || lowerContent.startsWith(word + ' ')) {
+        score -= 2;
+        break;
+      }
+    }
+
+    // Consider conversation length - longer conversations often contain useful info
+    if (segments.length > 3) {
+      score += 1;
+    }
+
+    return Math.max(0, Math.min(score, 10));
   }
 
   /**
    * Calculate weighted importance score
    */
-  private calculateWeightedScore(factors: {
-    explicit_emphasis: number;
-    emotional_weight: number;
-    future_utility: number;
-    repetition: number;
-    time_sensitivity: number;
-    context_anchoring: number;
-    novelty: number;
-  }): number {
+  private calculateWeightedScore(factors: ScoringFactors): number {
     const weights = {
       explicit_emphasis: 2.0,
       emotional_weight: 1.5,
@@ -261,7 +393,7 @@ export class MemoryScorer {
       novelty: 1.0
     };
 
-    const weightedSum = 
+    const weightedSum =
       factors.explicit_emphasis * weights.explicit_emphasis +
       factors.emotional_weight * weights.emotional_weight +
       factors.future_utility * weights.future_utility +
@@ -270,7 +402,7 @@ export class MemoryScorer {
       factors.context_anchoring * weights.context_anchoring +
       factors.novelty * weights.novelty;
 
-    const maxPossible = 
+    const maxPossible =
       10 * weights.explicit_emphasis +
       10 * weights.emotional_weight +
       10 * weights.future_utility +
@@ -314,6 +446,7 @@ export class MemoryScorer {
       contextAnchoring: number;
       timeSensitivity: number;
       novelty: number;
+      futureUtility: number;
     }
   ): string {
     const reasons: string[] = [];
@@ -321,9 +454,12 @@ export class MemoryScorer {
     if (factors.hasExplicit) reasons.push('user explicitly asked to remember');
     if (factors.emotionalWeight > 3) reasons.push('emotional/preference content detected');
     if (factors.repetitionScore > 5) reasons.push('repeated information');
+    if (factors.repetitionScore < 3) reasons.push('new, unique information');
     if (factors.contextAnchoring > 5) reasons.push('connects to existing memories');
     if (factors.timeSensitivity > 3) reasons.push('time-sensitive information');
-    if (factors.novelty > 7) reasons.push('new, novel information');
+    if (factors.novelty > 7) reasons.push('novel information');
+    if (factors.futureUtility > 7) reasons.push('high future utility predicted');
+    if (factors.futureUtility < 3) reasons.push('low future utility');
 
     if (reasons.length === 0) reasons.push('routine conversation');
 
@@ -334,26 +470,58 @@ export class MemoryScorer {
    * Cleanup ephemeral memories that have expired
    */
   async cleanupExpiredMemories(): Promise<{ deleted: number; upgraded: number }> {
-    // This would query Graphiti for ephemeral nodes older than their expiry
-    // TODO: Implement actual cleanup via Graphiti API
     console.log('[MemoryScorer] Running cleanup of expired ephemeral memories...');
-    return { deleted: 0, upgraded: 0 };
+
+    try {
+      // Use adapter's cleanup method
+      const result = await this.adapter.cleanup();
+      console.log(`[MemoryScorer] Cleanup complete: deleted ${result.deleted}, upgraded ${result.upgraded}`);
+      return result;
+    } catch (err) {
+      console.error('[MemoryScorer] Cleanup failed:', err);
+      return { deleted: 0, upgraded: 0 };
+    }
   }
 
   /**
-   * Check and upgrade/downgrade memories based on reinforcement
+   * Check and upgrade memories based on reinforcement
    */
   async processReinforcements(): Promise<{ upgraded: number; downgraded: number }> {
-    // Check which ephemeral memories have been referenced
-    // Upgrade if reinforced, downgrade if not
     console.log('[MemoryScorer] Processing memory reinforcements...');
-    return { upgraded: 0, downgraded: 0 };
+
+    try {
+      // Get all ephemeral memories
+      const ephemeralMemories = await this.adapter.list(50, 'ephemeral');
+
+      let upgraded = 0;
+
+      for (const memory of ephemeralMemories) {
+        // Check if memory has been reinforced (referenced in recent recalls)
+        const related = await this.adapter.getRelated(memory.id, 1);
+
+        if (related.length > 0) {
+          // Upgrade to silent tier
+          await this.adapter.update(memory.id, memory.content, {
+            ...memory.metadata,
+            tier: 'silent',
+          });
+          upgraded++;
+          console.log(`[MemoryScorer] Upgraded ephemeral to silent: ${memory.id}`);
+        }
+      }
+
+      console.log(`[MemoryScorer] Reinforcement processing complete: +${upgraded} upgraded`);
+      return { upgraded, downgraded: 0 };
+    } catch (err) {
+      console.error('[MemoryScorer] Reinforcement processing failed:', err);
+      return { upgraded: 0, downgraded: 0 };
+    }
   }
 }
 
 /**
  * Factory function to create a MemoryScorer
  */
-export function createMemoryScorer(client: GraphitiClient, config?: Partial<ScoringConfig>): MemoryScorer {
-  return new MemoryScorer(client, config);
+export function createMemoryScorer(adapter: MemoryAdapter, config?: Partial<ScoringConfig>): MemoryScorer {
+  return new MemoryScorer(adapter, config);
 }

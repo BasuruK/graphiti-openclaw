@@ -1,10 +1,11 @@
 /**
  * Graphiti Memory Hooks for OpenClaw
- * 
+ *
  * Provides auto-recall, auto-capture, and adaptive importance scoring functionality.
+ * Now uses MemoryAdapter interface for backend-agnostic operation.
  */
 
-import { GraphitiClient } from './client.js';
+import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult } from './memory-scorer.js';
 
 /** Minimum message length to consider for capture */
@@ -14,18 +15,18 @@ const MAX_CAPTURE_MESSAGES = 15;
 
 /**
  * Register memory hooks with the OpenClaw API
- * 
+ *
  * Registers three hooks:
  * - before_agent_start: Auto-recall relevant memories
  * - agent_end: Auto-capture with importance scoring
  * - heartbeat: Periodic memory consolidation/cleanup
- * 
+ *
  * @param api - OpenClaw plugin API
- * @param client - Graphiti client instance
+ * @param adapter - Memory adapter instance
  * @param config - Plugin configuration
  */
-export function registerHooks(api: any, client: GraphitiClient, config: any) {
-  
+export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
+
   // Initialize Memory Scorer with config
   const scoringConfig: Partial<ScoringConfig> = {
     enabled: config.scoringEnabled !== false,
@@ -38,20 +39,23 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
     askBeforeDowngrade: config.scoringAskBeforeDowngrade !== false
   };
 
-  const scorer = createMemoryScorer(client, scoringConfig);
+  const scorer = createMemoryScorer(adapter, scoringConfig);
 
   // Auto-Recall: Before each agent turn, inject relevant context
   api.on('before_agent_start', async (event: any) => {
     if (!config.autoRecall) return;
-    
+
     const prompt = event.prompt || '';
     if (!prompt || prompt.length < config.minPromptLength) return;
 
     try {
       console.log('[graphiti-memory] Auto-recall: Searching for relevant context...');
-      
-      const results = await client.searchNodes(prompt, config.recallMaxFacts || 5);
-      
+
+      const results = await adapter.recall(prompt, {
+        limit: config.recallMaxFacts || 5,
+        tier: 'all'
+      });
+
       if (!results || results.length === 0) {
         console.log('[graphiti-memory] Auto-recall: No relevant memories found');
         return;
@@ -59,7 +63,7 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
 
       const contextBlock = results
         .slice(0, config.recallMaxFacts || 5)
-        .map((r, i) => `• ${r.summary || r.name || r.fact}`)
+        .map((r, i) => `• ${r.summary || r.content.substring(0, 100)}`)
         .join('\n');
 
       console.log(`[graphiti-memory] Auto-recall: Found ${results.length} relevant memories`);
@@ -77,7 +81,7 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
   // Auto-Capture: After each conversation turn (with importance scoring)
   api.on('agent_end', async (event: any) => {
     if (!config.autoCapture) return;
-    
+
     const messages = event.messages;
     if (!messages || !Array.isArray(messages) || messages.length === 0) return;
 
@@ -85,17 +89,17 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
       // Extract conversation from messages
       const conversationSegments: { content: string; role: 'user' | 'assistant' }[] = [];
       let messageCount = 0;
-      
+
       // Get recent messages in reverse order
       const recentMessages = [...messages].reverse();
-      
+
       for (const msg of recentMessages) {
         if (messageCount >= MAX_CAPTURE_MESSAGES) break;
         if (!msg || typeof msg !== 'object') continue;
 
         const msgObj = msg as Record<string, any>;
         const role = msgObj.role;
-        
+
         if (role !== 'user' && role !== 'assistant') continue;
 
         // Extract text content
@@ -135,12 +139,12 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
       // ============================================================
       // ADAPTIVE SCORING: Analyze conversation and determine importance
       // ============================================================
-      
+
       if (scoringConfig.enabled) {
         console.log('[graphiti-memory] Scoring conversation for importance...');
-        
+
         const scoreResult = await scorer.scoreConversation(conversationSegments);
-        
+
         console.log(`[graphiti-memory] Score: ${scoreResult.score}/10 (${scoreResult.tier})`);
         console.log(`[graphiti-memory] Reasoning: ${scoreResult.reasoning}`);
         console.log(`[graphiti-memory] Action: ${scoreResult.recommendedAction}`);
@@ -150,27 +154,23 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
           case 'skip':
             console.log('[graphiti-memory] Skipping capture - low importance');
             return;
-            
+
           case 'store_ephemeral':
             console.log('[graphiti-memory] Storing as ephemeral (short-term)');
-            // TODO: Store with ephemeral tier + expiry metadata
-            // For now, store normally but log the intent
-            await storeWithMetadata(client, conversationSegments, sessionId, scoreResult);
+            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
             return;
-            
+
           case 'store_silent':
             console.log('[graphiti-memory] Storing as silent (medium importance)');
-            await storeWithMetadata(client, conversationSegments, sessionId, scoreResult);
+            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
             return;
-            
+
           case 'store_explicit':
             console.log('[graphiti-memory] Storing as explicit (high importance)');
-            // Store with metadata - will notify user
-            await storeWithMetadata(client, conversationSegments, sessionId, scoreResult);
-            
+            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
+
             // Optional: Notify user if configured
             if (scoringConfig.notifyOnExplicit) {
-              // Return a message to be shown to user (handled by hook return)
               console.log('[graphiti-memory] Would notify user: "Got it, noting that"');
             }
             return;
@@ -184,11 +184,16 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
 
       console.log(`[graphiti-memory] Auto-capturing ${conversationSegments.length} messages`);
 
-      await client.addEpisode(
+      await adapter.store(
         `[Session ${sessionId}]\n${conversation}`,
-        `session-${sessionId}-${Date.now()}`
+        {
+          tier: 'silent',
+          score: 5,
+          source: 'auto_capture',
+          sessionId,
+        }
       );
-      
+
       console.log('[graphiti-memory] Auto-capture: Conversation stored successfully');
     } catch (err) {
       console.error('[graphiti-memory] Auto-capture error:', err instanceof Error ? err.message : String(err));
@@ -199,15 +204,15 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
   // Register heartbeat/cleanup hook
   api.on('heartbeat', async () => {
     if (!scoringConfig.enabled) return;
-    
+
     console.log('[graphiti-memory] Running scheduled memory maintenance...');
-    
+
     // Cleanup expired ephemeral memories
     const cleanup = await scorer.cleanupExpiredMemories();
     if (cleanup.deleted > 0) {
       console.log(`[graphiti-memory] Cleaned up ${cleanup.deleted} expired memories`);
     }
-    
+
     // Process reinforcements (upgrade/downgrade)
     const reinforcements = await scorer.processReinforcements();
     if (reinforcements.upgraded > 0 || reinforcements.downgraded > 0) {
@@ -220,18 +225,16 @@ export function registerHooks(api: any, client: GraphitiClient, config: any) {
 
 /**
  * Store conversation with importance scoring metadata
- * 
- * Stores the conversation to Graphiti and logs the scoring metadata.
- * In production, this would also store the importance/tier properties
- * to the Graphiti node itself.
- * 
- * @param client - Graphiti client
+ *
+ * Stores the conversation to the adapter with metadata.
+ *
+ * @param adapter - Memory adapter
  * @param segments - Conversation segments
  * @param sessionId - Current session ID
  * @param scoreResult - Importance scoring result
  */
 async function storeWithMetadata(
-  client: GraphitiClient,
+  adapter: MemoryAdapter,
   segments: { content: string; role: 'user' | 'assistant' }[],
   sessionId: string,
   scoreResult: ScoringResult
@@ -240,13 +243,21 @@ async function storeWithMetadata(
     .map(s => `${s.role}: ${s.content}`)
     .join('\n\n');
 
-  const summary = `[${scoreResult.tier.toUpperCase()}] Session ${sessionId}\n${conversation}`;
-  const name = `session-${sessionId}-${Date.now()}`;
+  // Build metadata
+  const metadata = {
+    tier: scoreResult.tier,
+    score: scoreResult.score,
+    source: 'auto_capture' as const,
+    sessionId,
+    expiresAt: scoreResult.expiresInHours
+      ? new Date(Date.now() + scoreResult.expiresInHours * 3600000)
+      : undefined,
+  };
 
-  // Store to Graphiti - in production, we'd add metadata to the episode
-  await client.addEpisode(summary, name);
-  
-  // Log the stored metadata (in production, would store in Graphiti properties)
+  // Store to adapter
+  await adapter.store(conversation, metadata);
+
+  // Log the stored metadata
   console.log(`[graphiti-memory] Stored with metadata:`, {
     tier: scoreResult.tier,
     score: scoreResult.score,

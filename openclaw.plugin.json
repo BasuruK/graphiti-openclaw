@@ -8,15 +8,51 @@
   "configSchema": {
     "type": "object",
     "properties": {
+      "backend": {
+        "type": "string",
+        "enum": ["auto", "graphiti-mcp", "neo4j"],
+        "default": "auto",
+        "description": "Memory backend to use: auto-detect, graphiti-mcp, or neo4j"
+      },
       "endpoint": {
         "type": "string",
         "default": "http://localhost:8000",
-        "description": "Graphiti MCP server endpoint"
+        "description": "Graphiti MCP server endpoint (for graphiti-mcp backend)"
+      },
+      "transport": {
+        "type": "string",
+        "enum": ["stdio", "sse"],
+        "default": "sse",
+        "description": "Graphiti MCP transport type"
       },
       "groupId": {
         "type": "string",
         "default": "default",
         "description": "Memory group ID for all conversations"
+      },
+      "neo4j": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string",
+            "default": "bolt://localhost:7687",
+            "description": "Neo4j Bolt connection URI"
+          },
+          "user": {
+            "type": "string",
+            "default": "neo4j",
+            "description": "Neo4j username"
+          },
+          "password": {
+            "type": "string",
+            "description": "Neo4j password"
+          },
+          "database": {
+            "type": "string",
+            "description": "Neo4j database name"
+          }
+        },
+        "description": "Neo4j connection settings (for neo4j backend)"
       },
       "autoCapture": {
         "type": "boolean",
@@ -24,7 +60,7 @@
         "description": "Automatically capture conversations to memory"
       },
       "autoRecall": {
-        "type": "boolean", 
+        "type": "boolean",
         "default": true,
         "description": "Automatically recall relevant memories before each response"
       },
@@ -37,7 +73,7 @@
       },
       "minPromptLength": {
         "type": "number",
-        "default": 10,
+        "default": 20,
         "minimum": 1,
         "description": "Minimum prompt length to trigger recall"
       },
