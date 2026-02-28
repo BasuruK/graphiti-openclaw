@@ -1,22 +1,58 @@
 {
   "id": "graphiti-memory",
   "name": "Graphiti Memory",
-  "description": "Temporal knowledge graph memory for OpenClaw using Graphiti + Neo4j",
+  "description": "Temporal knowledge graph memory for OpenClaw with adaptive importance scoring (Memory Cortex)",
   "kind": "memory",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Basuru",
   "configSchema": {
     "type": "object",
     "properties": {
+      "backend": {
+        "type": "string",
+        "enum": ["auto", "graphiti-mcp", "neo4j"],
+        "default": "auto",
+        "description": "Memory backend to use: auto-detect, graphiti-mcp, or neo4j"
+      },
       "endpoint": {
         "type": "string",
-        "default": "http://localhost:8000",
-        "description": "Graphiti MCP server endpoint"
+        "default": "http://localhost:8000/sse",
+        "description": "Graphiti MCP server endpoint (for graphiti-mcp backend). When transport is 'sse', this should include the /sse path."
+      },
+      "transport": {
+        "type": "string",
+        "enum": ["stdio", "sse"],
+        "default": "sse",
+        "description": "Graphiti MCP transport type"
       },
       "groupId": {
         "type": "string",
         "default": "default",
         "description": "Memory group ID for all conversations"
+      },
+      "neo4j": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string",
+            "default": "bolt://localhost:7687",
+            "description": "Neo4j Bolt connection URI"
+          },
+          "user": {
+            "type": "string",
+            "default": "neo4j",
+            "description": "Neo4j username"
+          },
+          "password": {
+            "type": "string",
+            "description": "Neo4j password"
+          },
+          "database": {
+            "type": "string",
+            "description": "Neo4j database name"
+          }
+        },
+        "description": "Neo4j connection settings (for neo4j backend)"
       },
       "autoCapture": {
         "type": "boolean",
@@ -24,19 +60,72 @@
         "description": "Automatically capture conversations to memory"
       },
       "autoRecall": {
-        "type": "boolean", 
+        "type": "boolean",
         "default": true,
         "description": "Automatically recall relevant memories before each response"
       },
       "recallMaxFacts": {
         "type": "number",
         "default": 5,
+        "minimum": 1,
+        "maximum": 20,
         "description": "Maximum facts to recall per query"
       },
       "minPromptLength": {
         "type": "number",
-        "default": 10,
+        "default": 20,
+        "minimum": 1,
         "description": "Minimum prompt length to trigger recall"
+      },
+      "scoringEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable adaptive importance scoring"
+      },
+      "scoringExplicitThreshold": {
+        "type": "number",
+        "default": 8,
+        "minimum": 1,
+        "maximum": 10,
+        "description": "Score >= this triggers explicit storage (user notification). Must be strictly greater than scoringEphemeralThreshold. Runtime will reject or adjust conflicting values."
+      },
+      "scoringEphemeralThreshold": {
+        "type": "number",
+        "default": 4,
+        "minimum": 0,
+        "maximum": 9,
+        "description": "Score < this triggers ephemeral (temp) storage. Must be strictly less than scoringExplicitThreshold. Runtime will reject or adjust conflicting values."
+      },
+      "scoringEphemeralHours": {
+        "type": "number",
+        "default": 72,
+        "minimum": 1,
+        "maximum": 168,
+        "description": "Hours before ephemeral memories auto-expire"
+      },
+      "scoringSilentDays": {
+        "type": "number",
+        "default": 30,
+        "minimum": 1,
+        "maximum": 365,
+        "description": "Days before silent memories need reinforcement"
+      },
+      "scoringCleanupHours": {
+        "type": "number",
+        "default": 12,
+        "minimum": 1,
+        "maximum": 24,
+        "description": "How often to run cleanup via heartbeat (hours)"
+      },
+      "scoringNotifyExplicit": {
+        "type": "boolean",
+        "default": true,
+        "description": "Notify user when storing explicit importance memories"
+      },
+      "scoringAskBeforeDowngrade": {
+        "type": "boolean",
+        "default": true,
+        "description": "Ask user before downgrading memory importance"
       }
     }
   }
