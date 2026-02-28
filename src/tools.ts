@@ -103,8 +103,8 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
         });
 
         return {
-          content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${tier}` }],
-          details: { id, tier }
+          content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${storageTier}` }],
+          details: { id, tier: storageTier }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);

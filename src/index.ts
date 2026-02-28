@@ -83,6 +83,28 @@ function validateScoringConfig(config: Record<string, unknown>): void {
     console.warn('[nuron] scoringCleanupHours must be >= 1, clamping to 1');
     config.scoringCleanupHours = 1;
   }
+
+  // Validate scoringModel.endpoint URL
+  const scoringModel = config.scoringModel as Record<string, unknown> | undefined;
+  if (scoringModel && scoringModel.provider !== 'none') {
+    const endpoint = (scoringModel.endpoint as string) || 'http://localhost:8080';
+    try {
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error(`unsupported protocol "${parsed.protocol}"`);
+      }
+      if (!parsed.hostname) {
+        throw new Error('missing hostname');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `[nuron] Invalid scoringModel.endpoint "${endpoint}": ${msg}. ` +
+        `Expected a valid HTTP/HTTPS URL (e.g. "http://localhost:8080"). ` +
+        `Check your scoringModel config: provider=${scoringModel.provider}, model=${scoringModel.model ?? '(default)'}, endpoint=${endpoint}`
+      );
+    }
+  }
 }
 
 export default {
