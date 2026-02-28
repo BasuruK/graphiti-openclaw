@@ -1,10 +1,11 @@
 # Graphiti-OpenClaw — Comprehensive Architecture Review & Evaluation
 
-**Document Version:** 1.1  
+**Document Version:** 2.0  
 **Date:** February 27, 2026  
 **Author:** Senior AI Architect — Agentic Memory Systems  
 **Scope:** Full code review, architecture evaluation, compliance check, and forward roadmap  
-**Rev 1.1:** Added Section 4 — MCP-Native vs HTTP Proxy architecture decision (validated: MCP-native adopted)
+**Rev 1.1:** Added Section 4 — MCP-Native vs HTTP Proxy architecture decision (validated: MCP-native adopted)  
+**Rev 2.0:** Updated all sections to reflect v1.1.0 codebase — MCP-native migration complete, adapter pattern implemented, scoring factors implemented, many critical issues resolved
 
 ---
 
@@ -40,15 +41,15 @@
 | Dimension | Rating | Notes |
 |-----------|--------|-------|
 | **Architecture Vision** | ★★★★☆ | Strong conceptual foundation; extension-layer approach is differentiated |
-| **Transport Strategy** | ★★☆☆☆ | HTTP fetch proxy layer is redundant — **migrate to MCP-native** (see Section 4) |
-| **OpenClaw Compliance** | ★★☆☆☆ | Uses non-standard plugin API (`api.registerTool`, `api.on`); needs migration to `PluginContext` + `initialize()` |
-| **Code Quality** | ★★★☆☆ | Clean TypeScript, good error handling, but heavy use of `any`, duplicated files, stub implementations |
-| **Graphiti Integration** | ★★★☆☆ | Functional but thin — doesn't leverage Graphiti's temporal queries, entity types, or relationship traversal |
-| **Human-Like Memory** | ★★☆☆☆ | Scoring framework exists but 3 of 7 scoring factors are hardcoded stubs; no actual decay/reinforcement |
-| **Publishability** | ★★☆☆☆ | Missing tests, CI, LICENSE file, `.env.example`, proper npm packaging, and OpenClaw SDK types |
+| **Transport Strategy** | ★★★★☆ | ~~HTTP fetch proxy~~ → **MCP-native via adapter pattern adopted** (v1.1.0). Uses `@modelcontextprotocol/sdk` with SSE/stdio transports. HTTP proxy client deleted. |
+| **OpenClaw Compliance** | ★★★☆☆ | Still uses `api.registerTool` / `api.on` (not standard `PluginContext`), but now has shutdown handler, config validation, safe logging, and plugin ID migration |
+| **Code Quality** | ★★★★☆ | Clean TypeScript, good error handling, adapter pattern implemented, no duplicate files. Still uses `any` for API types; eslint added. All 7 scoring factors implemented. |
+| **Graphiti Integration** | ★★★☆☆ | Now backend-agnostic via `MemoryAdapter` interface; Graphiti MCP and Neo4j direct adapters implemented. Still doesn't leverage bi-temporal queries or graph traversal. |
+| **Human-Like Memory** | ★★★☆☆ | All 7 scoring factors now implemented (were stubs). Cleanup and reinforcement processing functional. Forgetting curve and associative recall still missing. |
+| **Publishability** | ★★★☆☆ | `.env.example`, `.gitignore`, eslint, `repository`/`license`/`keywords` in package.json all present. Still missing tests, CI, LICENSE file, and CHANGELOG. |
 | **Scalability** | ★★☆☆☆ | Single-group flat storage; no multi-user isolation, graph partitioning, or connection pooling |
 
-**Bottom line:** The project has a compelling vision and a solid starting architecture, but it's currently at ~40% implementation. The HTTP proxy client should be replaced with MCP-native communication (the protocol Graphiti was designed for). The Memory Cortex scoring concept is genuinely innovative and worth pursuing, but the code needs significant work before it's publishable or production-ready.
+**Bottom line:** The project has progressed from ~40% to ~65% implementation. The HTTP proxy client has been fully replaced with an adapter-based architecture supporting MCP-native (Graphiti) and direct Neo4j backends. All 7 Memory Cortex scoring factors are now functional (were stubs). Cleanup and reinforcement loops work. Key remaining gaps: tests, CI, LICENSE file, OpenClaw `PluginContext` migration, and advanced cognitive features (forgetting curve, associative recall, consolidation engine).
 
 ---
 
@@ -85,9 +86,9 @@ The project aims to be a **pluggable memory middle-layer** that:
 
 ## 3. Architecture Overview
 
-### 3.1 Current Architecture (HTTP Proxy — DEPRECATED)
+### 3.1 Previous Architecture (HTTP Proxy — REMOVED in v1.1.0)
 
-> **⚠️ ARCHITECTURAL DECISION:** The HTTP proxy approach below has been evaluated and rejected in favor of MCP-native communication. See [Section 4](#4-architecture-decision-mcp-native-vs-http-proxy) for the full analysis.
+> **⚠️ HISTORICAL:** The HTTP proxy client (`src/client.ts`) and root-level duplicate files have been fully deleted. The architecture below is preserved for historical reference only. See Section 3.2 for the current architecture.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -118,7 +119,9 @@ The project aims to be a **pluggable memory middle-layer** that:
               └─────────────────────────┘
 ```
 
-### 3.2 Target Architecture (MCP-Native)
+### 3.2 Current Architecture (Adapter Pattern — v1.1.0)
+
+> **IMPLEMENTED:** The plugin now uses a backend-agnostic `MemoryAdapter` interface with concrete implementations for Graphiti MCP (SSE/stdio) and Neo4j direct (Bolt). The adapter is selected via config or auto-detected from environment.
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
@@ -147,34 +150,43 @@ The project aims to be a **pluggable memory middle-layer** that:
 │  │  │ Hooks Layer  │  │ Memory Cortex Scoring     │  │    │
 │  │  │ auto-recall  │  │ Importance (0-10)         │  │    │
 │  │  │ auto-capture │  │ Tier assignment           │  │    │
-│  │  │ consolidate  │  │ Decay / Reinforcement     │  │    │
+│  │  │ heartbeat    │  │ Decay / Reinforcement     │  │    │
 │  │  └──────┬───────┘  └────────────┬──────────────┘  │    │
 │  │         │                       │                  │    │
-│  │  ┌──────┴───────────────────────┴──────────────┐  │    │
-│  │  │  MCP Client (@modelcontextprotocol/sdk)     │  │    │
-│  │  │  Calls Graphiti tools programmatically      │  │    │
-│  │  │  for hooks/scoring (NOT exposed as tools)   │  │    │
-│  │  └─────────────────────┬───────────────────────┘  │    │
-│  └────────────────────────┼───────────────────────────┘    │
-│                           │ MCP (stdio/SSE)                │
+│  │  ┌──────┴───────┐  ┌───────────┴──────────────┐  │    │
+│  │  │ Memory Tools │  │  AdapterFactory          │  │    │
+│  │  │ recall       │  │  auto-detect / explicit  │  │    │
+│  │  │ store        │  │                          │  │    │
+│  │  │ list         │  ├──────────┬───────────────┤  │    │
+│  │  │ forget       │  │ Graphiti │ Neo4j Direct  │  │    │
+│  │  │ consolidate  │  │ MCP      │ (Bolt)        │  │    │
+│  │  │ analyze      │  │ Adapter  │ Adapter       │  │    │
+│  │  │ status       │  │ (SSE/    │               │  │    │
+│  │  └──────────────┘  │  stdio)  │               │  │    │
+│  │                     └──────────┴───────────────┘  │    │
+│  └───────────────────────────────────────────────────┘    │
+│                           │ MCP (stdio/SSE) or Bolt       │
 └───────────────────────────┼────────────────────────────────┘
                             │
-               ┌────────────┴────────────┐
-               │  Graphiti MCP Server    │
-               │  (same server as above) │
-               └─────────────────────────┘
+          ┌─────────────────┼────────────────────┐
+          │                 │                    │
+┌─────────┴────┐  ┌────────┴──────┐  ┌──────────┴──┐
+│ Graphiti MCP │  │ Neo4j Direct  │  │ FalkorDB    │
+│ Server       │  │ (bolt://)     │  │ (TODO)      │
+│ (port 8000)  │  │               │  │             │
+└──────────────┘  └───────────────┘  └─────────────┘
 ```
 
-**Key insight:** The agent talks to Graphiti **directly** via MCP for basic operations. The plugin is the **cognitive layer** that adds scoring, hooks, and consolidation — it calls Graphiti via MCP client for its internal logic, but does NOT re-expose Graphiti's tools as wrapped HTTP proxies.
+**Key insight:** The agent talks to Graphiti **directly** via MCP for basic operations. The plugin is the **cognitive layer** that adds scoring, hooks, and consolidation — it calls the backend via the `MemoryAdapter` interface for its internal logic. The plugin also registers its own value-add tools (`memory_recall`, `memory_store`, `memory_list`, `memory_forget`, `memory_status`, `memory_consolidate`, `memory_analyze`).
 
 ### 3.3 Data Flow
 
 ```text
 User Message ──► before_agent_start Hook
                       │
-                      ├──► searchNodes(prompt) ──► Graphiti MCP
-                      │                              │
-                      ◄── <memory> context block ◄───┘
+                      ├──► adapter.recall(prompt) ──► Backend
+                      │                                │
+                      ◄── <memory> context block ◄─────┘
                       │
                  Agent processes turn (with memory context)
                       │
@@ -182,14 +194,16 @@ User Message ──► before_agent_start Hook
                agent_end Hook
                       │
                       ├──► Extract conversation segments
+                      │    (forward iteration, MAX_CAPTURE_MESSAGES)
                       ├──► MemoryScorer.scoreConversation()
                       │        │
                       │        ├── detectExplicitMarkers()
                       │        ├── detectEmotionalContent()
-                      │        ├── checkRepetition() [STUB]
-                      │        ├── checkContextAnchoring() [STUB]
+                      │        ├── checkRepetition() ✅ queries adapter
+                      │        ├── checkContextAnchoring() ✅ queries adapter
                       │        ├── detectTimeSensitivity()
-                      │        └── checkNovelty() [STUB]
+                      │        ├── checkNovelty() ✅ queries adapter
+                      │        └── predictFutureUtility() ✅ implemented
                       │        │
                       │        ▼
                       │    Score 0-10 → Tier Assignment
@@ -200,25 +214,34 @@ User Message ──► before_agent_start Hook
                       └──► store_explicit (permanent, notify user)
                                │
                                ▼
-                          client.addEpisode()
+                          adapter.store(content, metadata)
+```
+
+               heartbeat Hook (throttled by cleanupIntervalHours)
+                      │
+                      ├──► scorer.cleanupExpiredMemories() ✅
+                      │        └── adapter.cleanup()
+                      │
+                      └──► scorer.processReinforcements() ✅
+                               └── Per-memory: check related → upgrade tier
 ```
 
 ---
 
 ## 4. Architecture Decision: MCP-Native vs HTTP Proxy
 
-> **Decision: ADOPT MCP-NATIVE. Deprecate the HTTP proxy client.**
+> **Decision: ADOPTED. MCP-native is fully implemented in v1.1.0.**
 
-### 4.1 The Problem
+### 4.1 The Problem (RESOLVED)
 
-The project currently has two client implementations:
+The project previously had two client implementations:
 
-| File | Transport | Approach |
-|------|-----------|----------|
-| `src/client.ts` | **HTTP fetch** → `{endpoint}/mcp/` | Manually constructs JSON-RPC 2.0 payloads, manually parses `content[0].text` responses |
-| `client.ts` (root) | **MCP via mcporter** subprocess | Spawns `mcporter call graphiti-memory.<tool>` CLI commands |
+| File | Transport | Approach | Status |
+|------|-----------|----------|--------|
+| `src/client.ts` | **HTTP fetch** → `{endpoint}/mcp/` | Manually constructs JSON-RPC 2.0 payloads, manually parses `content[0].text` responses | **DELETED** |
+| `client.ts` (root) | **MCP via mcporter** subprocess | Spawns `mcporter call graphiti-memory.<tool>` CLI commands | **DELETED** |
 
-Both are proxies. The HTTP client (212 lines) re-implements what the MCP protocol already provides natively. It creates a **redundant middleware layer** between the agent and Graphiti.
+Both were proxies. The HTTP client (212 lines) re-implemented what the MCP protocol already provides natively. Both files have been fully removed and replaced by the `MemoryAdapter` pattern with `GraphitiMCPAdapter` using `@modelcontextprotocol/sdk`.
 
 ### 4.2 Why HTTP Proxy is Futile
 
@@ -255,23 +278,26 @@ The plugin's wrapped tools (`memory_recall`, `memory_store`, `memory_forget`, `m
 | **Graphiti built for it** | Graphiti's MCP server is a first-class citizen, not an afterthought |
 | **Already proven** | Root `client.ts` using mcporter (MCP protocol) already works |
 
-### 4.3 MCP-Native Architecture
+### 4.3 MCP-Native Architecture (IMPLEMENTED)
 
-With MCP-native, the plugin's role **shifts from tool proxy to cognitive orchestrator**:
+The plugin's role has **shifted from tool proxy to cognitive orchestrator**:
 
-#### What gets REMOVED
-- `src/client.ts` — the entire HTTP proxy client (212 lines)
-- `src/tools.ts` — the 4 wrapper tools that just proxy to Graphiti (the agent calls Graphiti directly)
-- Root `client.ts` — the older mcporter subprocess client
+#### What was REMOVED (DONE ✅)
+- `src/client.ts` — the entire HTTP proxy client (212 lines) — **deleted**
+- Root `client.ts` — the older mcporter subprocess client — **deleted**
+- Root-level duplicate `tools.ts`, `hooks.ts`, `index.ts` — **deleted**
 
-#### What STAYS (the actual value-add)
-- `src/memory-scorer.ts` — Memory Cortex importance scoring
-- `src/hooks.ts` — auto-recall, auto-capture, consolidation hooks
-- `src/index.ts` — plugin lifecycle (rewritten for OpenClaw SDK compliance)
+#### What STAYED (DONE ✅)
+- `src/memory-scorer.ts` — Memory Cortex importance scoring (all 7 factors now implemented)
+- `src/hooks.ts` — auto-recall, auto-capture, heartbeat hooks (now uses `MemoryAdapter`)
+- `src/index.ts` — plugin lifecycle (rewritten with config validation, migration, shutdown)
 
-#### What gets ADDED
-- **MCP Client** via `@modelcontextprotocol/sdk` — used by hooks to call Graphiti programmatically
-- **Enhanced tools** — only tools that add value beyond raw Graphiti (e.g., `memory_recall_scored`, `memory_consolidate`)
+#### What was ADDED (DONE ✅)
+- `src/adapters/memory-adapter.ts` — Backend-agnostic `MemoryAdapter` interface
+- `src/adapters/graphiti-adapter.ts` — Graphiti MCP adapter via `@modelcontextprotocol/sdk`
+- `src/adapters/neo4j-adapter.ts` — Direct Neo4j Bolt adapter
+- `src/adapters/factory.ts` — `AdapterFactory` with auto-detect cascade and config-driven creation
+- `src/tools.ts` — **retained and enhanced** with 7 tools (recall, store, list, forget, status, consolidate, analyze) that operate through the adapter — these are cognitive tools, not proxies
 
 ### 4.4 How the Plugin Calls Graphiti via MCP
 
@@ -355,7 +381,7 @@ Agent's tool inventory:
            clear_graph, or any future Graphiti tools.
 ```
 
-#### AFTER (MCP-native — agent sees Graphiti tools directly + plugin's cognitive tools)
+#### CURRENT (v1.1.0 — adapter-based tools + Graphiti MCP auto-discovery)
 ```text
 Agent's tool inventory:
   │
@@ -368,74 +394,84 @@ Agent's tool inventory:
   │   ├── clear_graph         ← reset
   │   └── get_status          ← health check
   │
-  └── [From Memory Cortex Plugin — value-add tools]
+  └── [From Memory Cortex Plugin — cognitive tools via MemoryAdapter]
+      ├── memory_recall       ← adapter-based recall with tier filtering
+      ├── memory_store        ← store with tier + scoring metadata
+      ├── memory_list         ← browse with tier/limit filters
+      ├── memory_forget       ← delete by UUID
+      ├── memory_status       ← health + stats from adapter
       ├── memory_consolidate  ← synthesize recent memories
-      └── memory_analyze      ← score/assess a memory's importance
+      └── memory_analyze      ← score/assess importance
 
-  Benefit: Full Graphiti surface area. Plugin only adds cognitive tools.
+  Benefit: Full Graphiti surface area via MCP + cognitive tools via adapter.
 ```
 
-### 4.6 Impact on Codebase
+### 4.6 Impact on Codebase (COMPLETED)
 
-| File | Action | Reason |
+| File | Action | Status |
 |------|--------|--------|
-| `src/client.ts` | **DELETE** | Replaced by MCP client |
-| `client.ts` (root) | **DELETE** | Legacy mcporter proxy — also replaced |
-| `src/tools.ts` | **REWRITE** | Remove proxy tools; keep only cognitive/enhanced tools |
-| `src/hooks.ts` | **REFACTOR** | Replace `client.searchNodes()` calls with MCP client |
-| `src/index.ts` | **REFACTOR** | Initialize MCP client instead of HTTP client |
-| `src/memory-scorer.ts` | **KEEP** | No transport dependency — pure scoring logic |
-| `src/mcp-client.ts` | **CREATE** | New MCP client using `@modelcontextprotocol/sdk` |
-| `package.json` | **UPDATE** | Add `@modelcontextprotocol/sdk` dependency |
+| `src/client.ts` | **DELETED** | ✅ Replaced by `MemoryAdapter` |
+| `client.ts` (root) | **DELETED** | ✅ Legacy mcporter proxy removed |
+| `src/tools.ts` | **REWRITTEN** | ✅ Now 7 cognitive tools using `MemoryAdapter` with `normalizeTier()` validation |
+| `src/hooks.ts` | **REFACTORED** | ✅ Uses `MemoryAdapter` interface; forward iteration; throttled heartbeat |
+| `src/index.ts` | **REFACTORED** | ✅ Config validation, plugin ID migration, shutdown handler, adapter initialization |
+| `src/memory-scorer.ts` | **ENHANCED** | ✅ All 7 scoring factors implemented; threshold validation; per-memory error handling |
+| `src/adapters/memory-adapter.ts` | **CREATED** | ✅ Core `MemoryAdapter` interface + all type definitions |
+| `src/adapters/graphiti-adapter.ts` | **CREATED** | ✅ Graphiti MCP adapter via `@modelcontextprotocol/sdk` |
+| `src/adapters/neo4j-adapter.ts` | **CREATED** | ✅ Direct Neo4j Bolt adapter |
+| `src/adapters/factory.ts` | **CREATED** | ✅ `AdapterFactory` with auto-detect cascade |
+| `package.json` | **UPDATED** | ✅ v1.1.0, `@modelcontextprotocol/sdk` + `neo4j-driver` deps, eslint |
 
-### 4.7 Configuration Change
+### 4.7 Configuration (Current — v1.1.0)
 
 ```yaml
-# BEFORE (HTTP)
+# Current configuration (adapter-based)
 graphiti-memory:
-  endpoint: "http://localhost:8000"     # HTTP URL
+  backend: "auto"                        # or "graphiti-mcp" or "neo4j"
+  transport: "sse"                       # or "stdio"
+  endpoint: "http://localhost:8000/sse"  # for SSE transport
   groupId: "default"
-
-# AFTER (MCP)
-graphiti-memory:
-  transport: "stdio"                     # or "sse"
-  mcpCommand: "uv"                       # for stdio
-  mcpArgs: ["run", "graphiti-mcp", "--transport", "stdio"]
-  # OR for remote:
-  # transport: "sse"
-  # endpoint: "http://localhost:8000/sse"
-  groupId: "default"
+  # OR for Neo4j direct:
+  # backend: "neo4j"
+  # neo4j:
+  #   uri: "bolt://localhost:7687"
+  #   user: "neo4j"
+  #   password: "secret"
 ```
 
 ---
 
 ## 5. OpenClaw Plugin Compliance Audit
 
-### 4.1 Plugin Standard (Expected by OpenClaw)
+### 5.1 Plugin Standard (Expected by OpenClaw)
 
 Based on the [OpenClaw Plugin SDK documentation](https://deepwiki.com/openclaw/openclaw/10.3-creating-custom-plugins), plugins must:
 
 | Requirement | Expected | This Project | Status |
 |-------------|----------|--------------|--------|
-| **Entry point** | `export async function initialize(context: PluginContext)` | `export default { register(api) }` | ❌ MISMATCH |
-| **Shutdown hook** | `export async function shutdown()` or `context.onShutdown()` | Not implemented | ❌ MISSING |
-| **Plugin manifest** | `openclaw.extensions` in `package.json` | Present (`./index.ts`) | ✅ |
-| **Plugin context** | `context: PluginContext` with `config`, `gateway`, `onShutdown` | Uses `api: any` | ❌ WRONG API |
+| **Entry point** | `export async function initialize(context: PluginContext)` | `export default { id, register(api) }` | ❌ MISMATCH |
+| **Shutdown hook** | `export async function shutdown()` or `context.onShutdown()` | ✅ Registers via `api.onShutdown()` or `api.on('shutdown')` | ✅ IMPLEMENTED |
+| **Plugin manifest** | `openclaw.extensions` in `package.json` | Present (`./dist/index.js`) | ✅ |
+| **Plugin context** | `context: PluginContext` with `config`, `gateway`, `onShutdown` | Uses `api: any` with `api.pluginConfig` | ⚠️ WORKS BUT UNTYPED |
 | **Tool registration** | Via `context.gateway.registerMethod()` | Via `api.registerTool()` | ⚠️ UNVERIFIED |
 | **Hook registration** | Not a standard plugin feature; hooks are gateway-level | `api.on('before_agent_start')` | ⚠️ UNVERIFIED |
-| **Config schema** | Zod-validated, merged into `OpenClawSchema` | JSON Schema in `openclaw.plugin.json` | ⚠️ FORMAT MISMATCH |
-| **Type safety** | Import from `openclaw/plugin-sdk` | All types are `any` | ❌ NO TYPES |
+| **Config schema** | Zod-validated, merged into `OpenClawSchema` | JSON Schema in `openclaw.plugin.json` with min/max bounds | ⚠️ FORMAT MISMATCH |
+| **Type safety** | Import from `openclaw/plugin-sdk` | API types are `any`; internal types well-defined | ⚠️ PARTIAL |
 | **Module system** | ESM (`"type": "module"`) | Correct | ✅ |
+| **Config validation** | Host-side or plugin-side | ✅ `validateScoringConfig()` with threshold invariant enforcement | ✅ IMPLEMENTED |
+| **Safe logging** | Don't expose secrets in logs | ✅ Config logged with secrets masked (`[configured]`) | ✅ IMPLEMENTED |
+| **Plugin ID migration** | Handle renames gracefully | ✅ `migratePluginSettings()` from legacy 'graphiti' ID | ✅ IMPLEMENTED |
 
-### 4.2 Critical Compliance Issues
+### 5.2 Remaining Compliance Issues
 
-#### Issue #1: Plugin Entry Point Pattern
+#### Issue #1: Plugin Entry Point Pattern (STILL OPEN)
 
 **Current (non-standard):**
 ```typescript
 // index.ts
 export default {
   id: 'graphiti-memory',
+  legacyIds: ['graphiti'],
   async register(api: any) { ... }
 };
 ```
@@ -459,29 +495,15 @@ export async function shutdown() {
 }
 ```
 
-#### Issue #2: `api.registerTool()` and `api.on()` are Not Verified APIs
+#### Issue #2: `api.registerTool()` and `api.on()` are Not Verified APIs (STILL OPEN)
 
 The code uses `api.registerTool()` and `api.on('before_agent_start')` which are not documented in the OpenClaw Plugin SDK. OpenClaw's plugin system provides `context.gateway.registerMethod()` for RPC methods.
 
 **Resolution needed:** Verify if OpenClaw has an undocumented skill/tool registration API, or if the project is targeting a different extension point (possibly "skills" rather than "plugins"). A "skill" in OpenClaw is a SKILL.md file + tools, and memory plugins like `memory-lancedb` exist as extension packages. The actual mechanism for registering custom tools from a plugin needs to be validated against the OpenClaw source.
 
-#### Issue #3: Duplicate Files
+#### ~~Issue #3: Duplicate Files~~ (RESOLVED ✅)
 
-The project has **two sets of identical files** — one at root (`client.ts`, `tools.ts`, `hooks.ts`, `index.ts`) and one under `src/`. The root files are stale copies (e.g., `client.ts` at root uses `spawn('mcporter')` subprocess calls while `src/client.ts` uses `fetch` HTTP). This creates confusion about which is canonical.
-
-**Root files (legacy — mcporter subprocess):**
-- `client.ts` — spawns `mcporter call` subprocesses
-- `tools.ts` — identical to `src/tools.ts` but no limit clamping
-- `hooks.ts` — nearly identical to `src/hooks.ts`
-- `index.ts` — nearly identical to `src/index.ts`
-
-**`src/` files (current — HTTP/fetch):**
-- `client.ts` — uses `fetch()` with JSON-RPC protocol
-- `tools.ts` — has limit clamping (`Math.min(Math.max(...))`)
-- `hooks.ts` — identical logic
-- `memory-scorer.ts` — Memory Cortex implementation
-
-**Action:** Delete root-level duplicates. The `src/` files are canonical.
+Root-level duplicate files (`client.ts`, `tools.ts`, `hooks.ts`, `index.ts`) have been **deleted**. The `src/` directory is now the sole canonical source. The `src/client.ts` HTTP proxy has also been deleted, replaced by the `MemoryAdapter` pattern.
 
 ---
 
@@ -489,48 +511,25 @@ The project has **two sets of identical files** — one at root (`client.ts`, `t
 
 ### 6.1 What Graphiti Offers vs. What's Used
 
+> **Note:** As of v1.1.0, the plugin operates through a `MemoryAdapter` interface. The Graphiti MCP adapter (`graphiti-adapter.ts`) maps adapter operations to Graphiti's MCP tools. The table below reflects what the adapter layer exposes vs. what Graphiti provides natively.
+
 | Graphiti Capability | Available | Used by Plugin | Gap |
 |---------------------|-----------|----------------|-----|
-| **Episode ingestion** with entity+relationship extraction | ✅ | ✅ (addEpisode) | — |
-| **Semantic node search** (embedding-based) | ✅ | ✅ (searchNodes) | — |
-| **Fact/edge search** (relationship queries) | ✅ | ⚠️ (client has method, never called) | Facts are richer than nodes for recall |
-| **Bi-temporal queries** (valid_at, invalid_at) | ✅ | ❌ Not used | Critical for "what was true then?" |
+| **Episode ingestion** with entity+relationship extraction | ✅ | ✅ via `adapter.store()` → `add_memory` | — |
+| **Semantic node search** (embedding-based) | ✅ | ✅ via `adapter.recall()` → `search_nodes` | — |
+| **Fact/edge search** (relationship queries) | ✅ | ⚠️ Adapter interface has `searchByEntity()` | Could be better leveraged for richer recall |
+| **Bi-temporal queries** (valid_at, invalid_at) | ✅ | ⚠️ `MemoryResult` has `validAt`/`invalidAt` fields defined but not widely used | Critical for "what was true then?" |
 | **Custom entity types** (Pydantic models) | ✅ | ❌ Config exists but not leveraged | Would improve extraction quality |
-| **Graph traversal** (related entities, paths) | ✅ | ❌ Not used | Essential for contextual memory |
+| **Graph traversal** (related entities, paths) | ✅ | ⚠️ `adapter.getRelated()` exists, used in reinforcement processing | Could be expanded for associative recall |
 | **Community detection** (clusters of related knowledge) | ✅ | ❌ Not used | Would enable "memory neighborhoods" |
 | **Edge invalidation** (contradiction handling) | ✅ | ❌ Not used | Critical for memory updating |
-| **Group management** (multi-tenant) | ✅ | ⚠️ (single group hardcoded) | No multi-user support |
-| **Hybrid search** (semantic + keyword + graph) | ✅ | ❌ Only semantic | Missing keyword and graph search |
+| **Group management** (multi-tenant) | ✅ | ⚠️ `groupId` is configurable per plugin instance | No multi-user isolation within a single instance |
+| **Hybrid search** (semantic + keyword + graph) | ✅ | ❌ Only semantic via recall | Missing keyword and graph search |
 | **Graph distance reranking** | ✅ | ❌ Not used | Would improve relevance |
 
-### 6.2 MCP Client Issues (HTTP Proxy — To Be Removed)
+### 6.2 MCP Client Issues (RESOLVED ✅)
 
-> **These issues are moot once the MCP-native migration (Section 4) is complete.** Documented here for historical reference.
-
-**Issue: JSON-RPC Session handling**
-
-The `src/client.ts` sends `sessionId: "oc-${Date.now()}"` which creates a **new session for every call**. MCP servers typically expect persistent sessions. This means:
-- Each call may trigger server-side session initialization overhead
-- No session continuity or caching benefits
-- The Graphiti MCP server may not optimize queries across the session
-
-**Issue: Response parsing**
-
-```typescript
-const text = data.result?.content?.[0]?.text;
-```
-
-This assumes the MCP response always wraps results in `content[0].text` as a JSON string. If Graphiti updates its MCP response format, this breaks silently.
-
-**Issue: Single endpoint path**
-
-```typescript
-const response = await fetch(`${this.config.endpoint}/mcp/`, { ... });
-```
-
-The trailing `/mcp/` is hardcoded. If Graphiti changes its MCP endpoint path, there's no way to configure it.
-
-**Resolution:** All three issues are eliminated by migrating to `@modelcontextprotocol/sdk` which handles session management, response parsing, and transport configuration natively.
+> The HTTP proxy client (`src/client.ts`) with its fragile JSON-RPC session handling, response parsing, and hardcoded endpoint path has been **fully replaced** by the `GraphitiMCPAdapter` which uses `@modelcontextprotocol/sdk` natively. All three original issues (ephemeral sessions, fragile parsing, single endpoint path) are eliminated by the SDK.
 
 ---
 
@@ -538,67 +537,76 @@ The trailing `/mcp/` is hardcoded. If Graphiti changes its MCP endpoint path, th
 
 ### 7.1 What Works
 
-1. **Clean module separation**: `client.ts`, `tools.ts`, `hooks.ts`, `memory-scorer.ts` have clear responsibilities
-2. **Error resilience**: All tool executions and hooks are wrapped in try/catch with graceful fallbacks
-3. **Timeout protection**: The HTTP client has a 30-second AbortController timeout
-4. **Config validation**: Memory scorer validates that `ephemeralThreshold < explicitThreshold`
+1. **Clean module separation**: `tools.ts`, `hooks.ts`, `memory-scorer.ts`, and `adapters/` have clear responsibilities. No duplicate files.
+2. **Error resilience**: All tool executions and hooks are wrapped in try/catch with graceful fallbacks. Heartbeat maintenance uses independent try/catch blocks for cleanup and reinforcement.
+3. **Backend-agnostic adapter pattern**: `MemoryAdapter` interface in `adapters/memory-adapter.ts` with concrete Graphiti MCP and Neo4j implementations. Factory with auto-detect cascade.
+4. **Config validation**: `validateScoringConfig()` enforces threshold invariants at startup. `MemoryScorer` constructor throws on invalid thresholds. `openclaw.plugin.json` has min/max bounds on numeric fields.
 5. **Content filtering**: Auto-capture filters out injected `<memory>` blocks to prevent recursive storage
 6. **Message truncation**: Captured messages are capped at 500 chars to prevent oversized episodes
-7. **Limit clamping**: Recall tool clamps results to 1-20 range
-8. **Scoring architecture**: The weighted multi-factor scoring model is well-structured and extensible
-9. **Docker Compose**: Infrastructure setup with Neo4j health checks is production-quality
+7. **Limit clamping**: Recall tool clamps results to 1-20 range; list tool clamps to 1-50 range
+8. **All 7 scoring factors implemented**: `checkRepetition()`, `checkNovelty()`, `checkContextAnchoring()`, `predictFutureUtility()` all query the adapter — no longer stubs
+9. **Tier validation**: `normalizeTier()` helper validates tier strings against `VALID_TIERS` array; no unsafe casts
+10. **Cleanup and reinforcement**: `cleanupExpiredMemories()` delegates to `adapter.cleanup()`. `processReinforcements()` processes per-memory with individual error handling.
+11. **Plugin lifecycle**: Shutdown handler registered. Plugin ID migration from legacy IDs. Safe config logging (secrets masked).
+12. **Docker Compose**: Infrastructure setup with Neo4j health checks is production-quality
+13. **Chronological message ordering**: Forward iteration with `startIdx` avoids reverse-iterate-reverse antipattern
+14. **Heartbeat throttling**: Gated by `scoringConfig.enabled` and throttled by `cleanupIntervalHours` via module-level timestamp
 
 ### 7.2 What Breaks
 
 #### CRITICAL Issues
 
-| # | Issue | Location | Impact |
-|---|-------|----------|--------|
-| 1 | **Plugin API mismatch** — `api.registerTool()` / `api.on()` don't match OpenClaw's `PluginContext` | `index.ts`, `tools.ts`, `hooks.ts` | Plugin won't load in OpenClaw |
-| 2 | **HTTP proxy client is redundant** — duplicates MCP protocol manually over fetch | `src/client.ts` | 212 lines of unnecessary code; fragile parsing, no retry, ephemeral sessions — **migrate to MCP-native (Section 4)** |
-| 3 | **3 of 7 scoring factors are stubs** returning hardcoded values | `memory-scorer.ts` L168-185 | Scoring is unreliable; novelty=6 and repetition=3 always |
-| 4 | **`cleanupExpiredMemories()` is a no-op** | `memory-scorer.ts` L327 | Ephemeral memories never expire |
-| 5 | **`processReinforcements()` is a no-op** | `memory-scorer.ts` L335 | Memories never upgrade/downgrade |
-| 6 | **Tier metadata not stored** in Graphiti | `hooks.ts` L196 | Only prepended as text `[EPHEMERAL]`; not queryable |
-| 7 | **Duplicate file sets** (root vs `src/`) with diverging implementations | Project structure | Ambiguity about canonical source |
-| 8 | **No `memory-scorer.ts` at root** | Missing | Root-level files import from scorer that doesn't exist at root |
+| # | Issue | Location | Impact | Status |
+|---|-------|----------|--------|--------|
+| 1 | **Plugin API mismatch** — `api.registerTool()` / `api.on()` don't match OpenClaw's `PluginContext` | `index.ts`, `tools.ts`, `hooks.ts` | Plugin may not load in OpenClaw | ❌ OPEN |
+| 2 | ~~HTTP proxy client is redundant~~ | ~~`src/client.ts`~~ | ~~Replaced by MemoryAdapter~~ | ✅ RESOLVED |
+| 3 | ~~3 of 7 scoring factors are stubs~~ | ~~`memory-scorer.ts`~~ | ~~All 7 factors now query adapter~~ | ✅ RESOLVED |
+| 4 | ~~`cleanupExpiredMemories()` is a no-op~~ | ~~`memory-scorer.ts`~~ | ~~Now delegates to `adapter.cleanup()`~~ | ✅ RESOLVED |
+| 5 | ~~`processReinforcements()` is a no-op~~ | ~~`memory-scorer.ts`~~ | ~~Now processes per-memory with error handling~~ | ✅ RESOLVED |
+| 6 | ~~Tier metadata not stored~~ | ~~`hooks.ts`~~ | ~~Now stored via `adapter.store()` with structured metadata~~ | ✅ RESOLVED |
+| 7 | ~~Duplicate file sets~~ | ~~Project structure~~ | ~~Root-level duplicates deleted~~ | ✅ RESOLVED |
+| 8 | ~~No `memory-scorer.ts` at root~~ | ~~Missing~~ | ~~Root files deleted~~ | ✅ RESOLVED |
 
 #### HIGH Issues
 
-| # | Issue | Location | Impact |
-|---|-------|----------|--------|
-| 9 | **`searchFacts()` never called** — agent can't access it because proxy doesn't expose it | `client.ts` | **Resolved by MCP-native**: agent sees `search_facts` directly |
-| 10 | **No connection pooling or retry** for HTTP client | `client.ts` | **Resolved by MCP-native**: SDK handles transport |
-| 11 | **`heartbeat` hook registration assumes OpenClaw provides it** — undocumented | `hooks.ts` L175 | Cleanup never runs |
-| 12 | **`minPromptLength` defaults to 10** | `index.ts` | Too short; even "hi" passes. Should be ~20-30 |
-| 13 | **`future_utility` always defaults to 5** | `memory-scorer.ts` L106 | The most important scoring factor is static |
-| 14 | **No deduplication** for auto-stored episodes | `hooks.ts` | Same conversation stored multiple times across turns |
+| # | Issue | Location | Impact | Status |
+|---|-------|----------|--------|--------|
+| 9 | ~~`searchFacts()` never called~~ | — | Agent can access Graphiti tools directly via MCP | ✅ RESOLVED |
+| 10 | ~~No connection pooling or retry for HTTP client~~ | — | SDK handles transport | ✅ RESOLVED |
+| 11 | **`heartbeat` hook assumes OpenClaw provides it** — undocumented | `hooks.ts` | Cleanup may never run if host doesn't emit heartbeat events | ⚠️ OPEN |
+| 12 | ~~`minPromptLength` defaults to 10~~ | `index.ts` | ~~Now defaults to 20~~ | ✅ RESOLVED |
+| 13 | ~~`future_utility` always defaults to 5~~ | `memory-scorer.ts` | ~~Now analyzes content for utility indicators~~ | ✅ RESOLVED |
+| 14 | **No deduplication** for auto-stored episodes | `hooks.ts` | Same conversation stored multiple times across turns | ❌ OPEN |
 
 #### MEDIUM Issues
 
-| # | Issue | Location | Impact |
-|---|-------|----------|--------|
-| 15 | **All types are `any`** (`api: any`, `config: any`, `event: any`) | Everywhere | No type safety; runtime errors likely |
-| 16 | **No `.env.example` file** | Missing | Users don't know required environment variables |
-| 17 | **No LICENSE file** | Missing | Not legally distributable |
-| 18 | **No test files** | Missing | Zero test coverage |
-| 19 | **`config-docker-neo4j.yaml` is duplicated** (root + `config/`) | Two locations | Confusion about which to use |
-| 20 | **`memory_forget` requires UUID** but user has no way to discover UUIDs | `tools.ts` | Tool is unusable without a "list memories" feature — **resolved by MCP-native** (agent can call `get_episodes` directly) |
-| 21 | **Conversation segments are reversed then re-reversed** | `hooks.ts` L83-109 | Complex logic that could introduce ordering bugs |
+| # | Issue | Location | Impact | Status |
+|---|-------|----------|--------|--------|
+| 15 | **API types are `any`** (`api: any`, `config: any`, `event: any`) | `index.ts`, `hooks.ts`, `tools.ts` | No type safety for host API; internal types well-defined | ⚠️ OPEN |
+| 16 | ~~No `.env.example` file~~ | — | ~~Present with Neo4j + OpenRouter vars~~ | ✅ RESOLVED |
+| 17 | **No LICENSE file** | Missing | Not legally distributable | ❌ OPEN |
+| 18 | **No test files** | Missing | Zero test coverage | ❌ OPEN |
+| 19 | **`config-docker-neo4j.yaml` is duplicated** (root + `config/`) | Two locations | Confusion about which to use | ⚠️ OPEN |
+| 20 | ~~`memory_forget` requires UUID but no list tool~~ | — | ~~`memory_list` tool now exists~~ | ✅ RESOLVED |
+| 21 | ~~Conversation segments reversed then re-reversed~~ | `hooks.ts` | ~~Forward iteration with `startIdx`~~ | ✅ RESOLVED |
 
 ### 7.3 Code Quality Issues
 
 ```text
-Metric                     Current        Target
-─────────────────────────────────────────────────
-Type safety                any everywhere  Full PluginContext types
-Test coverage              0%             >80%
-Stub implementations       3/7 factors    0/7 factors
-Dead code (root dups)      4 files        0 files
-Error codes                None           Enumerated error types
-Logging                    console.log    Structured logging (levels)
-Config validation          Partial        Zod schema validation
-Documentation coverage     README only    Full JSDoc + API docs
+Metric                     v1.0 (was)     v1.1.0 (now)     Target
+──────────────────────────────────────────────────────────────────────
+Type safety                any everywhere  any for API,     Full PluginContext types
+                                          internal typed
+Test coverage              0%             0%               >80%
+Stub implementations       3/7 factors    0/7 factors ✅   0/7 factors
+Dead code (root dups)      4 files        0 files ✅       0 files
+Error codes                None           None             Enumerated error types
+Logging                    console.log    console.log      Structured logging (levels)
+Config validation          Partial        Robust ✅         Zod schema validation
+Documentation coverage     README only    README + docs/   Full JSDoc + API docs
+Linting                    None           eslint added ✅   Strict preset
+Tier validation            unsafe casts   normalizeTier ✅  Full type guards
+Shutdown handling          None           Implemented ✅    Context-based
 ```
 
 ---
@@ -613,16 +621,16 @@ Human memory operates through several systems. Here's how this project maps:
 |---------------------|-------------|----------------------|-----|
 | **Sensory Memory** | Brief buffer (ms-seconds) | ❌ Not implemented | Could capture raw conversation before scoring |
 | **Working Memory** | Active context (seconds-minutes) | ⚠️ Partial — auto-recall injects context | No working memory size limit or management |
-| **Short-Term Memory** | Hours-days retention | ⚠️ Ephemeral tier (concept exists, stub impl) | No actual TTL enforcement |
-| **Long-Term (Declarative)** | Facts, events (explicit retrieval) | ✅ Explicit tier + memory tools | Works but scoring is unreliable |
+| **Short-Term Memory** | Hours-days retention | ✅ Ephemeral tier with TTL (72h default), cleanup via adapter | TTL enforcement depends on adapter implementation |
+| **Long-Term (Declarative)** | Facts, events (explicit retrieval) | ✅ Explicit tier + 7 memory tools | Scoring now reliable with all 7 factors |
 | **Long-Term (Procedural)** | How-to knowledge (implicit) | ❌ Not implemented | Could extract and store procedures separately |
-| **Episodic Memory** | Personal experiences with time/place context | ⚠️ Episodes stored but temporal context weak | Graphiti supports bi-temporal but not leveraged |
-| **Semantic Memory** | General knowledge, facts | ⚠️ Node search exists | No separation from episodic memory |
+| **Episodic Memory** | Personal experiences with time/place context | ⚠️ Episodes stored with session/timestamp metadata | Graphiti supports bi-temporal but not fully leveraged |
+| **Semantic Memory** | General knowledge, facts | ⚠️ Semantic search via adapter.recall() | No separation from episodic memory |
 | **Prospective Memory** | Remember to do things in future | ❌ Not implemented | Time-sensitive detection exists but no action |
-| **Memory Consolidation** | Sleep-like integration of new memories with old | ❌ N/A | Missing — key differentiator opportunity |
+| **Memory Consolidation** | Sleep-like integration of new memories with old | ⚠️ Basic `memory_consolidate` tool exists | Simplified clustering; no LLM-based synthesis yet |
 | **Forgetting Curve** | Natural decay over time | ❌ Concept exists, no implementation | Ebbinghaus curve could be applied |
-| **Associative Recall** | One memory triggers related memories | ❌ Not implemented | Graphiti's graph traversal could enable this |
-| **Emotional Tagging** | Emotional events remembered more strongly | ⚠️ Keyword detection only | No sentiment analysis or emotional weighting |
+| **Associative Recall** | One memory triggers related memories | ⚠️ `adapter.getRelated()` used in reinforcement | Not yet used during recall for enrichment |
+| **Emotional Tagging** | Emotional events remembered more strongly | ⚠️ Keyword detection + weighted scoring | No sentiment analysis; keyword-based emotional weight |
 
 ### 8.2 What's Missing for "Human-Like" Memory
 
@@ -642,179 +650,57 @@ Human memory operates through several systems. Here's how this project maps:
 
 ## 9. Logic & Feature Improvements
 
-### 9.1 Immediate Fixes (Required for Functionality)
+### 9.1 Immediate Fixes (COMPLETED ✅)
 
-#### Fix 1: Implement Stub Scoring Factors
+> **All three fixes from the original review have been implemented in v1.1.0.**
 
+#### ~~Fix 1: Implement Stub Scoring Factors~~ ✅ DONE
+
+All 7 scoring factors now query the adapter:
+- `checkRepetition()` — queries `adapter.recall()` for similar content, calculates average similarity
+- `checkNovelty()` — queries `adapter.recall()`, returns inverse of similarity (novel = high score)
+- `checkContextAnchoring()` — queries `adapter.recall()`, weights by tier (explicit × 3, silent × 2)
+- `predictFutureUtility()` — analyzes content for high/medium/low utility keyword indicators
+
+#### ~~Fix 2: Store Tier Metadata as Structured Data~~ ✅ DONE
+
+`storeWithMetadata()` in `hooks.ts` now passes structured metadata to `adapter.store()`:
 ```typescript
-// checkRepetition — Query Graphiti for similar existing content
-private async checkRepetition(segments: ConversationSegment[]): Promise<number> {
-  const combined = segments.map(s => s.content).join(' ');
-  try {
-    const existing = await this.client.searchNodes(combined, 3);
-    if (!existing || existing.length === 0) return 0; // Novel content
-    
-    // Calculate semantic overlap
-    const maxSimilarity = Math.max(
-      ...existing.map(r => this.textSimilarity(combined, r.summary || r.name || ''))
-    );
-    return Math.round(maxSimilarity * 10); // 0-10
-  } catch {
-    return 3; // Default on error
-  }
-}
-
-// checkNovelty — Inverse of repetition
-private async checkNovelty(content: string): Promise<number> {
-  const repetition = await this.checkRepetition([{ content, role: 'user' }]);
-  return 10 - repetition; // High novelty = low repetition
-}
-
-// checkContextAnchoring — Find connections to existing high-value memories
-private async checkContextAnchoring(content: string): Promise<number> {
-  try {
-    const related = await this.client.searchFacts(content, 5);
-    if (!related || related.length === 0) return 0;
-    return Math.min(related.length * 2, 10);
-  } catch {
-    return 3;
-  }
-}
+const metadata = {
+  tier: scoreResult.tier,
+  score: scoreResult.score,
+  source: 'auto_capture',
+  sessionId,
+  expiresAt: scoreResult.expiresInHours
+    ? new Date(Date.now() + scoreResult.expiresInHours * 3600000)
+    : undefined,
+};
+await adapter.store(conversation, metadata);
 ```
 
-#### Fix 2: Store Tier Metadata as Structured Data
+#### ~~Fix 3: Implement Ephemeral Cleanup~~ ✅ DONE
 
-Instead of prepending `[EPHEMERAL]` to the text, use Graphiti's entity properties:
-
-```typescript
-async function storeWithMetadata(
-  client: GraphitiClient,
-  segments: ConversationSegment[],
-  sessionId: string,
-  scoreResult: ScoringResult
-): Promise<void> {
-  const conversation = segments.map(s => `${s.role}: ${s.content}`).join('\n\n');
-  
-  // Include metadata in a structured format that Graphiti can extract as entities
-  const enrichedContent = JSON.stringify({
-    conversation,
-    metadata: {
-      importance_score: scoreResult.score,
-      memory_tier: scoreResult.tier,
-      expires_at: scoreResult.expiresInHours 
-        ? new Date(Date.now() + scoreResult.expiresInHours * 3600000).toISOString()
-        : null,
-      scoring_reasoning: scoreResult.reasoning,
-      session_id: sessionId,
-      created_at: new Date().toISOString()
-    }
-  });
-
-  await client.addEpisode(enrichedContent, `session-${sessionId}-${Date.now()}`);
-}
-```
-
-#### Fix 3: Implement Ephemeral Cleanup
-
-```typescript
-async cleanupExpiredMemories(): Promise<{ deleted: number; upgraded: number }> {
-  let deleted = 0;
-  let upgraded = 0;
-  
-  try {
-    // Search for ephemeral memories
-    const episodes = await this.client.getEpisodes(50);
-    const now = Date.now();
-    
-    for (const episode of episodes) {
-      // Check if episode content contains metadata with expiry
-      try {
-        const data = JSON.parse(episode.content);
-        if (data.metadata?.expires_at) {
-          const expiresAt = new Date(data.metadata.expires_at).getTime();
-          if (now > expiresAt) {
-            // Check if it was reinforced (referenced recently)
-            const reinforced = await this.checkIfReinforced(episode);
-            if (reinforced) {
-              // Upgrade to silent tier instead of deleting
-              upgraded++;
-            } else {
-              await this.client.deleteEpisode(episode.uuid);
-              deleted++;
-            }
-          }
-        }
-      } catch {
-        // Not structured metadata — skip
-      }
-    }
-  } catch (err) {
-    console.error('[MemoryScorer] Cleanup error:', err);
-  }
-  
-  return { deleted, upgraded };
-}
-```
+`cleanupExpiredMemories()` delegates to `adapter.cleanup()`. `processReinforcements()` lists ephemeral memories, checks for related memories via `adapter.getRelated()`, and upgrades reinforced memories to silent tier. Each memory is processed in its own try/catch block.
 
 ### 9.2 Feature Improvements
 
-#### Feature 1: `memory_list` Tool
+#### ~~Feature 1: `memory_list` Tool~~ ✅ IMPLEMENTED
 
-Users currently cannot discover what memories exist. Add a browsing tool:
+The `memory_list` tool exists with limit clamping (1-50) and tier filtering via `normalizeTier()`.
 
-```typescript
-api.registerTool({
-  name: 'memory_list',
-  label: 'Memory List',
-  description: 'List recent memories with their importance scores.',
-  parameters: Type.Object({
-    limit: Type.Optional(Type.Number({ default: 10 })),
-    tier: Type.Optional(Type.String({ 
-      description: 'Filter by tier: explicit, silent, ephemeral, or all',
-      default: 'all'
-    }))
-  }),
-  async execute(toolCallId: string, params: { limit?: number; tier?: string }) {
-    const episodes = await client.getEpisodes(params.limit || 10);
-    // Format and filter by tier...
-  }
-});
-```
+#### Feature 2: `memory_update` Tool (STILL TODO)
 
-#### Feature 2: `memory_update` Tool
+The `MemoryAdapter` interface supports `update(id, content, metadata)` but no user-facing tool exposes it yet. Would allow modifying existing memories without delete+recreate.
 
-Allow modifying existing memories without delete+recreate:
+#### Feature 3: Semantic Deduplication Before Storage (STILL TODO)
 
 ```typescript
-api.registerTool({
-  name: 'memory_update',
-  label: 'Memory Update',
-  description: 'Update or correct an existing memory.',
-  parameters: Type.Object({
-    uuid: Type.String({ description: 'UUID of memory to update' }),
-    content: Type.String({ description: 'Updated content' })
-  }),
-  async execute(toolCallId: string, params: { uuid: string; content: string }) {
-    // Delete old, store corrected version
-    await client.deleteEpisode(params.uuid);
-    const result = await client.addEpisode(params.content);
-    return { content: [{ type: 'text', text: `Memory updated (new ID: ${result.uuid})` }] };
-  }
-});
-```
-
-#### Feature 3: Semantic Deduplication Before Storage
-
-```typescript
-async function shouldStore(client: GraphitiClient, content: string): Promise<boolean> {
-  const existing = await client.searchNodes(content, 3);
+async function shouldStore(adapter: MemoryAdapter, content: string): Promise<boolean> {
+  const existing = await adapter.recall(content, { limit: 3 });
   if (!existing || existing.length === 0) return true;
   
   // If highly similar content already exists, skip
-  const isDuplicate = existing.some(r => {
-    const similarity = computeJaccardSimilarity(content, r.summary || '');
-    return similarity > 0.8;
-  });
+  const isDuplicate = existing.some(r => r.relevanceScore > 0.8);
   
   return !isDuplicate;
 }
@@ -826,19 +712,18 @@ Instead of single-query recall, decompose the prompt into multiple semantic quer
 
 ```typescript
 async function associativeRecall(
-  client: GraphitiClient, 
+  adapter: MemoryAdapter, 
   prompt: string, 
   limit: number
-): Promise<SearchResult[]> {
+): Promise<MemoryResult[]> {
   // Primary: direct semantic match
-  const primary = await client.searchNodes(prompt, limit);
+  const primary = await adapter.recall(prompt, { limit });
   
-  // Secondary: search for facts related to entities in primary results
-  const entityNames = primary.map(r => r.name).filter(Boolean);
-  const secondaryResults: SearchResult[] = [];
+  // Secondary: find related memories for top results
+  const secondaryResults: MemoryResult[] = [];
   
-  for (const entity of entityNames.slice(0, 3)) {
-    const related = await client.searchFacts(entity, 2);
+  for (const result of primary.slice(0, 3)) {
+    const related = await adapter.getRelated(result.id, 1);
     secondaryResults.push(...related);
   }
   
@@ -846,8 +731,8 @@ async function associativeRecall(
   const allResults = [...primary, ...secondaryResults];
   const seen = new Set<string>();
   return allResults.filter(r => {
-    if (seen.has(r.uuid)) return false;
-    seen.add(r.uuid);
+    if (seen.has(r.id)) return false;
+    seen.add(r.id);
     return true;
   }).slice(0, limit);
 }
@@ -881,64 +766,38 @@ function applyForgettingCurve(
 
 ---
 
-## 10. Generalization Strategy (Backend-Agnostic)
+## 10. Generalization Strategy (Backend-Agnostic) — IMPLEMENTED ✅
 
-### 10.1 Adapter Pattern for Backend Independence
+### 10.1 Adapter Pattern for Backend Independence (DONE)
 
-To support multiple backends (Graphiti, Neo4j direct, FalkorDB, SQLite, Qdrant, etc.), introduce an **abstraction layer**:
+The `MemoryAdapter` interface has been implemented in `src/adapters/memory-adapter.ts`. It provides a comprehensive contract that all backends must implement:
 
 ```typescript
-// src/adapters/memory-adapter.ts
+// src/adapters/memory-adapter.ts (actual implementation)
 export interface MemoryAdapter {
+  // Lifecycle
+  initialize(): Promise<void>;
+  shutdown(): Promise<void>;
+  
   // Core CRUD
-  store(content: string, metadata: MemoryMetadata): Promise<string>; // returns UUID
+  store(content: string, metadata: Partial<MemoryMetadata>): Promise<string>;
   recall(query: string, options: RecallOptions): Promise<MemoryResult[]>;
   forget(id: string): Promise<void>;
   update(id: string, content: string, metadata?: Partial<MemoryMetadata>): Promise<void>;
   
   // Search variants
-  searchSemantic(query: string, limit: number): Promise<MemoryResult[]>;
-  searchByEntity(entityName: string, limit: number): Promise<MemoryResult[]>;
-  searchByTimeRange(start: Date, end: Date): Promise<MemoryResult[]>;
+  list(limit?: number, tier?: string): Promise<MemoryResult[]>;
+  searchByEntity(entityName: string, limit?: number): Promise<MemoryResult[]>;
+  searchByTimeRange(start: Date, end: Date, limit?: number): Promise<MemoryResult[]>;
   
-  // Graph operations (optional — not all backends support)
-  getRelated?(id: string, depth: number): Promise<MemoryResult[]>;
-  getEntityNetwork?(entityName: string): Promise<EntityGraph>;
+  // Graph operations
+  getRelated(id: string, depth?: number): Promise<MemoryResult[]>;
   
-  // Lifecycle
-  healthCheck(): Promise<boolean>;
-  cleanup(olderThan: Date): Promise<number>;
-  
-  // Metadata
+  // Operations
+  healthCheck(): Promise<HealthResult>;
   getStats(): Promise<MemoryStats>;
-}
-
-export interface MemoryMetadata {
-  tier: 'explicit' | 'silent' | 'ephemeral';
-  score: number;
-  expiresAt?: Date;
-  sessionId?: string;
-  source: 'auto_capture' | 'user_explicit' | 'agent_auto';
-  tags?: string[];
-}
-
-export interface MemoryResult {
-  id: string;
-  content: string;
-  summary?: string;
-  score: number;
-  metadata: MemoryMetadata;
-  createdAt: Date;
-  lastAccessedAt?: Date;
-  accessCount: number;
-}
-
-export interface RecallOptions {
-  limit: number;
-  minScore?: number;
-  tier?: 'explicit' | 'silent' | 'ephemeral' | 'all';
-  timeRange?: { start: Date; end: Date };
-  includeRelated?: boolean;
+  cleanup(): Promise<{ deleted: number; upgraded: number }>;
+  getBackendType(): string;
 }
 ```
 
@@ -946,41 +805,34 @@ export interface RecallOptions {
 
 ```text
 src/adapters/
-├── memory-adapter.ts        # Interface definition
-├── graphiti-adapter.ts      # Graphiti MCP server adapter (current)
-├── neo4j-direct-adapter.ts  # Direct Neo4j Bolt driver
-├── falkordb-adapter.ts      # FalkorDB adapter
-├── sqlite-adapter.ts        # Lightweight SQLite + embeddings
-├── qdrant-adapter.ts        # Vector-only (Qdrant)
-└── in-memory-adapter.ts     # Development/testing
+├── memory-adapter.ts        # Interface + all type definitions (MemoryMetadata, MemoryResult, RecallOptions, etc.)
+├── graphiti-adapter.ts      # ✅ Graphiti MCP server adapter (SSE/stdio via @modelcontextprotocol/sdk)
+├── neo4j-adapter.ts         # ✅ Direct Neo4j Bolt driver adapter
+├── factory.ts               # ✅ AdapterFactory with auto-detect cascade + createAdapterFromConfig()
+├── index.ts                 # Re-exports
+├── falkordb-adapter.ts      # TODO
+└── sqlite-adapter.ts        # TODO
 ```
 
-### 10.3 Configuration for Backend Selection
+### 10.3 Configuration for Backend Selection (IMPLEMENTED)
+
+Configuration is handled via `openclaw.plugin.json` and the `configSchema` in `index.ts`:
 
 ```json
 {
-  "plugins": {
-    "graphiti-memory": {
-      "backend": "graphiti",
-      "backends": {
-        "graphiti": {
-          "endpoint": "http://localhost:8000",
-          "groupId": "default"
-        },
-        "neo4j": {
-          "uri": "bolt://localhost:7687",
-          "user": "neo4j",
-          "password": "secret"
-        },
-        "sqlite": {
-          "path": "~/.openclaw/memory.db",
-          "embeddingProvider": "openai"
-        }
-      }
-    }
-  }
+  "backend": "auto",
+  "transport": "sse",
+  "endpoint": "http://localhost:8000/sse",
+  "groupId": "default"
 }
 ```
+
+Backend selection supports:
+- **`"auto"`** — Auto-detect cascade: env vars (Neo4j → Graphiti) → defaults (localhost Neo4j → localhost Graphiti) → error
+- **`"graphiti-mcp"`** — Explicit Graphiti MCP with configurable transport/endpoint
+- **`"neo4j"`** — Direct Neo4j Bolt connection with nested config object
+
+The `AdapterFactory` also handles failed health checks by calling `adapter.shutdown()` before trying the next backend.
 
 ---
 
@@ -992,49 +844,50 @@ src/adapters/
 |------|--------|----------|
 | ❌ **LICENSE file** (MIT/Apache-2.0) | Missing | CRITICAL |
 | ❌ **Tests** (unit + integration) | None | CRITICAL |
-| ❌ **`.env.example`** with required vars | Missing | HIGH |
-| ❌ **`.gitignore`** | Missing | HIGH |
+| ✅ **`.env.example`** with required vars | Present (Neo4j + OpenRouter vars) | — |
+| ✅ **`.gitignore`** | Present | — |
 | ❌ **CI pipeline** (GitHub Actions) | Missing | HIGH |
-| ❌ **Type safety** (remove all `any` types) | Not done | HIGH |
-| ❌ **Delete root-level duplicate files** | Not done | HIGH |
+| ⚠️ **Type safety** (remove all `any` types) | API types still `any`; internal types well-defined | HIGH |
+| ✅ **Delete root-level duplicate files** | Done | — |
 | ✅ **README.md** with setup instructions | Present | — |
 | ✅ **Docker Compose** for infrastructure | Present | — |
-| ⚠️ **package.json** well-formed | Needs `repository`, `license`, `keywords` | MEDIUM |
-| ⚠️ **OpenClaw plugin manifest** | Needs validation against SDK | MEDIUM |
+| ✅ **package.json** well-formed | v1.1.0 with `repository`, `license`, `keywords`, `exports` | — |
+| ⚠️ **OpenClaw plugin manifest** | `openclaw.plugin.json` present with full configSchema; needs entry point validation | MEDIUM |
 | ❌ **CHANGELOG.md** | Missing | MEDIUM |
-| ❌ **API documentation** (generated from JSDoc) | Missing | LOW |
-| ❌ **Example configurations** for different setups | Partial | LOW |
+| ⚠️ **API documentation** (generated from JSDoc) | Architecture docs in `docs/`; no generated API docs | LOW |
+| ⚠️ **Example configurations** for different setups | Multiple config YAML files in `config/`; root config duplicated | LOW |
+| ✅ **eslint** | Added to devDependencies | — |
+| ⚠️ **`config-docker-neo4j.yaml` duplicated** | Root + `config/` still have separate versions | LOW |
 
-### 11.2 Recommended `package.json` Updates
+### 11.2 Current `package.json` (v1.1.0)
+
+The package.json has been updated with proper fields:
 
 ```json
 {
   "name": "@basuru/graphiti-memory",
-  "version": "0.1.0",
-  "description": "Human-like agentic memory system for OpenClaw with adaptive importance scoring",
+  "version": "1.1.0",
+  "description": "Graphiti temporal knowledge graph memory for OpenClaw with Memory Cortex adaptive importance scoring",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist/", "README.md", "LICENSE", "openclaw.plugin.json"],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/basuru/graphiti-openclaw"
+  "exports": {
+    ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" },
+    "./adapters": { "import": "./dist/adapters/index.js", "types": "./dist/adapters/index.d.ts" }
   },
-  "keywords": [
-    "openclaw", "memory", "graphiti", "knowledge-graph",
-    "ai-agent", "temporal-memory", "neo4j", "agentic"
-  ],
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "lint": "eslint src/",
-    "prepublishOnly": "npm run build"
+  "repository": { "type": "git", "url": "https://github.com/basuru/graphiti-openclaw" },
+  "keywords": ["openclaw", "memory", "graphiti", "knowledge-graph", "neo4j", "ai-agent", "temporal-memory", "agentic", "memory-cortex"],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@sinclair/typebox": "^0.32.0",
+    "neo4j-driver": "^5.22.0"
   },
-  "openclaw": {
-    "extensions": ["./dist/index.js"]
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.0.0"
   }
 }
 ```
@@ -1043,27 +896,36 @@ src/adapters/
 
 ## 12. Future Roadmap: Self-Managed Memory Engine
 
-### Phase 1: Stabilize & Migrate to MCP-Native (Weeks 1-3)
+### Phase 1: Stabilize & Migrate to MCP-Native — COMPLETED ✅
 
-- [ ] **Migrate to MCP-native** — replace `src/client.ts` HTTP proxy with `@modelcontextprotocol/sdk` client
-- [ ] **Remove proxy tools** — delete `memory_recall`, `memory_store`, `memory_forget`, `memory_status` wrappers from `src/tools.ts`
-- [ ] **Delete duplicate files** — remove root-level `client.ts`, `tools.ts`, `hooks.ts`, `index.ts`
-- [ ] Fix OpenClaw plugin compliance (`initialize(context)` pattern)
-- [ ] Implement stub scoring factors
-- [ ] Add unit tests (>70% coverage)
-- [ ] Add `.env.example`, LICENSE, `.gitignore`
-- [ ] Implement ephemeral cleanup
-- [ ] Add cognitive-only tools (`memory_consolidate`, `memory_analyze`)
+- [x] **Migrate to MCP-native** — `src/client.ts` HTTP proxy deleted; `GraphitiMCPAdapter` uses `@modelcontextprotocol/sdk`
+- [x] **Rewrite tools** — 7 cognitive tools using `MemoryAdapter` with `normalizeTier()` validation
+- [x] **Delete duplicate files** — root-level `client.ts`, `tools.ts`, `hooks.ts`, `index.ts` removed
+- [x] Implement shutdown handler (`api.onShutdown()` or `api.on('shutdown')`)
+- [x] Implement all 7 scoring factors (were stubs)
+- [x] Implement ephemeral cleanup via `adapter.cleanup()`
+- [x] Implement reinforcement processing with per-memory error handling
+- [x] Add `.env.example`, `.gitignore`
+- [x] Add cognitive tools (`memory_consolidate`, `memory_analyze`, `memory_list`)
+- [x] Add config validation (`validateScoringConfig()`, threshold invariants)
+- [x] Add plugin ID migration from legacy IDs
+- [ ] Fix OpenClaw plugin compliance (`initialize(context)` pattern) — **STILL OPEN**
+- [ ] Add unit tests (>70% coverage) — **STILL OPEN**
 
-### Phase 2: Backend Abstraction (Weeks 4-6)
+### Phase 2: Backend Abstraction — COMPLETED ✅
 
-- [ ] Design `MemoryAdapter` interface
-- [ ] Refactor Graphiti client to implement adapter
+- [x] Design `MemoryAdapter` interface (comprehensive — 15+ methods)
+- [x] Implement Graphiti MCP adapter (`graphiti-adapter.ts`)
+- [x] Implement Neo4j direct adapter (`neo4j-adapter.ts`)
+- [x] Implement `AdapterFactory` with auto-detect cascade
+- [x] Configuration-driven backend selection (`auto`, `graphiti-mcp`, `neo4j`)
 - [ ] Add SQLite adapter for lightweight deployments
-- [ ] Configuration-driven backend selection
+- [ ] Add FalkorDB adapter
 - [ ] Integration tests per backend
+- [ ] Add LICENSE file — **CRITICAL, still missing**
+- [ ] Add CHANGELOG.md
 
-### Phase 3: Cognitive Memory Features (Weeks 7-10)
+### Phase 3: Cognitive Memory Features (Next Priority)
 
 - [ ] Implement forgetting curve decay
 - [ ] Implement memory consolidation (periodic synthesis)
@@ -1268,27 +1130,30 @@ async function proactiveAlerts(
 
 ## 14. Implementation Priority Matrix
 
-| Priority | Task | Effort | Impact | Dependencies |
-|----------|------|--------|--------|--------------|
-| **P0** | **Migrate to MCP-native** — replace HTTP client with `@modelcontextprotocol/sdk` | M | Critical | None |
-| **P0** | **Remove proxy tools** — delete wrapper tools from `src/tools.ts` | S | High | P0 MCP |
-| **P0** | **Delete duplicate files** (root-level `client.ts`, `tools.ts`, `hooks.ts`, `index.ts`) | S | High | None |
-| **P0** | Fix OpenClaw plugin compliance (initialize/PluginContext) | M | Critical | None |
-| **P0** | Add LICENSE file | S | Critical | None |
-| **P1** | Implement stub scoring factors (repetition, novelty, anchoring) | M | High | P0 MCP |
-| **P1** | Implement ephemeral cleanup | M | High | P0 |
-| **P1** | Add `.env.example`, `.gitignore` | S | Medium | None |
-| **P1** | Add cognitive-only tools (`memory_consolidate`, `memory_analyze`) | M | High | P0 MCP |
-| **P2** | Add unit tests | L | High | P0 |
-| **P2** | Remove `any` types, add proper TypeScript interfaces | M | Medium | P0 |
-| **P2** | Implement forgetting curve decay on recall | M | Medium | None |
-| **P3** | Design `MemoryAdapter` interface | M | High | P1, P2 |
-| **P3** | Add deduplication before storage | M | Medium | None |
-| **P3** | Implement associative recall | L | High | P3 adapter |
-| **P4** | Memory consolidation engine | XL | High | P3 |
-| **P4** | Context-aware recall strategies | L | Medium | P3 |
-| **P4** | SQLite adapter for lightweight mode | L | High | P3 adapter |
-| **P5** | Self-managed memory engine (no Graphiti) | XXL | High | P4 |
+> **Updated for v1.1.0** — completed items struck through, remaining items re-prioritized.
+
+| Priority | Task | Effort | Impact | Status |
+|----------|------|--------|--------|--------|
+| ~~**P0**~~ | ~~Migrate to MCP-native~~ | ~~M~~ | ~~Critical~~ | ✅ DONE |
+| ~~**P0**~~ | ~~Rewrite tools with adapter pattern~~ | ~~M~~ | ~~High~~ | ✅ DONE |
+| ~~**P0**~~ | ~~Delete duplicate files~~ | ~~S~~ | ~~High~~ | ✅ DONE |
+| **P0** | Fix OpenClaw plugin compliance (initialize/PluginContext) | M | Critical | ❌ OPEN |
+| **P0** | Add LICENSE file | S | Critical | ❌ OPEN |
+| ~~**P1**~~ | ~~Implement scoring factors (repetition, novelty, anchoring, utility)~~ | ~~M~~ | ~~High~~ | ✅ DONE |
+| ~~**P1**~~ | ~~Implement ephemeral cleanup~~ | ~~M~~ | ~~High~~ | ✅ DONE |
+| ~~**P1**~~ | ~~Add `.env.example`, `.gitignore`~~ | ~~S~~ | ~~Medium~~ | ✅ DONE |
+| ~~**P1**~~ | ~~Add cognitive tools (`memory_consolidate`, `memory_analyze`, `memory_list`)~~ | ~~M~~ | ~~High~~ | ✅ DONE |
+| **P1** | Add unit tests | L | High | ❌ OPEN |
+| **P1** | Remove `any` types for API, add proper TypeScript interfaces | M | Medium | ❌ OPEN |
+| **P2** | Implement forgetting curve decay on recall | M | Medium | ❌ OPEN |
+| **P2** | Add deduplication before storage | M | Medium | ❌ OPEN |
+| ~~**P3**~~ | ~~Design `MemoryAdapter` interface~~ | ~~M~~ | ~~High~~ | ✅ DONE |
+| **P2** | Add FalkorDB adapter | L | Medium | ❌ OPEN |
+| **P2** | Add SQLite adapter for lightweight mode | L | High | ❌ OPEN |
+| **P3** | Implement associative recall (graph traversal in recall path) | L | High | ❌ OPEN |
+| **P3** | Context-aware recall strategies | L | Medium | ❌ OPEN |
+| **P4** | Memory consolidation engine (LLM-based synthesis) | XL | High | ❌ OPEN |
+| **P5** | Self-managed memory engine (no Graphiti) | XXL | High | ❌ OPEN |
 
 **Effort Key:** S = <1 day, M = 1-3 days, L = 1-2 weeks, XL = 2-4 weeks, XXL = 1-2 months
 
@@ -1296,22 +1161,24 @@ async function proactiveAlerts(
 
 ## 15. Appendix: Reference Architecture Diagrams
 
-### 15.1 Target Architecture (Post-Generalization)
+### 15.1 Current Architecture (v1.1.0 — Implemented)
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
 │                     OpenClaw Gateway                         │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │            Agentic Memory Plugin                     │   │
+│  │            Agentic Memory Plugin (v1.1.0)            │   │
 │  │                                                      │   │
 │  │  ┌──────────┐  ┌──────────────┐  ┌───────────────┐ │   │
 │  │  │ Tools    │  │ Hooks Layer  │  │ Memory Cortex │ │   │
-│  │  │ recall   │  │ auto-recall  │  │ Scoring       │ │   │
-│  │  │ store    │  │ auto-capture │  │ Consolidation │ │   │
-│  │  │ forget   │  │ heartbeat    │  │ Forgetting    │ │   │
-│  │  │ list     │  │              │  │ Metacognition │ │   │
-│  │  │ update   │  │              │  │               │ │   │
+│  │  │ recall   │  │ auto-recall  │  │ 7-factor      │ │   │
+│  │  │ store    │  │ auto-capture │  │ scoring       │ │   │
+│  │  │ forget   │  │ heartbeat    │  │ Cleanup       │ │   │
+│  │  │ list     │  │ (throttled)  │  │ Reinforcement │ │   │
+│  │  │ status   │  │              │  │               │ │   │
+│  │  │ consol.  │  │              │  │               │ │   │
+│  │  │ analyze  │  │              │  │               │ │   │
 │  │  └──────────┘  └──────────────┘  └───────────────┘ │   │
 │  │                       │                              │   │
 │  │  ┌────────────────────┴──────────────────────────┐  │   │
@@ -1371,23 +1238,28 @@ async function proactiveAlerts(
 
 ### Strengths
 1. **Innovative Memory Cortex concept** — tiered importance scoring is a genuine differentiator
-2. **Clean separation of concerns** — client, tools, hooks, scorer are well-isolated
-3. **Robust error handling** — graceful degradation throughout
-4. **Good infrastructure setup** — Docker Compose with health checks
-5. **Forward-thinking config schema** — comprehensive scoring parameters
+2. **Clean separation of concerns** — tools, hooks, scorer, adapters are well-isolated with clear responsibilities
+3. **Backend-agnostic adapter pattern** — `MemoryAdapter` interface with Graphiti MCP and Neo4j implementations; auto-detect cascade
+4. **All 7 scoring factors implemented** — repetition, novelty, context anchoring, future utility, explicit markers, emotional weight, time sensitivity
+5. **Robust error handling** — graceful degradation throughout; per-memory try/catch in reinforcement; independent cleanup/reinforcement blocks
+6. **Good infrastructure setup** — Docker Compose with Neo4j health checks
+7. **Comprehensive config schema** — min/max bounds, threshold invariant validation, safe logging, plugin ID migration
+8. **Complete tool suite** — 7 cognitive tools (recall, store, list, forget, status, consolidate, analyze)
+9. **Functional lifecycle** — Cleanup, reinforcement, heartbeat throttling, and shutdown all implemented
 
-### Critical Gaps
-1. **HTTP proxy client is architectural debt** — must migrate to MCP-native (Section 4)
-2. **OpenClaw plugin API mismatch** — won't load in its current form
-3. **3 of 7 scoring factors are stubs** — core feature is incomplete
-4. **No cleanup implementation** — ephemeral memories persist forever
-5. **No tests, no CI, no LICENSE** — not publishable
-6. **Duplicate file structure** — root vs src confusion
+### Remaining Gaps
+1. **OpenClaw plugin API mismatch** — still uses `export default { register(api) }` instead of `initialize(context: PluginContext)`. May not load in standard OpenClaw.
+2. **No tests, no CI, no LICENSE** — not publishable
+3. **API types still `any`** — host API interactions have no type safety
+4. **No deduplication** for auto-stored episodes
+5. **No forgetting curve** — memories don't decay in relevance over time
+6. **No associative recall** — `getRelated()` exists but isn't used during recall
+7. **Config YAML duplication** — `config-docker-neo4j.yaml` at root + `config/`
 
 ### Recommendation
 
-**Invest in this project.** The vision is sound, the Memory Cortex concept fills a real gap in the agentic memory ecosystem, and the architecture is amenable to the backend-agnostic evolution you're planning. **First priority: migrate from HTTP proxy to MCP-native** — this eliminates 212+ lines of fragile client code, gives the agent full access to Graphiti's capabilities, and aligns with how every major AI framework handles tool communication. Then focus on the remaining P0/P1 items to get a functional, publishable v0.1, and iterate towards the cognitive memory features that will truly differentiate this from Graphiti/Mem0/Cognee.
+**Continue investing in this project.** The v1.1.0 release represents significant progress — from ~40% to ~65% implementation. The HTTP proxy has been eliminated, the adapter pattern is battle-ready, all scoring factors are functional, and the plugin has proper lifecycle management. **Next priorities: add a LICENSE file, write unit tests, and fix the OpenClaw plugin entry point pattern.** Then pursue cognitive features (forgetting curve, associative recall, LLM-based consolidation) that will truly differentiate this from Graphiti/Mem0/Cognee.
 
 ---
 
-*Document prepared for Lead Software Engineer review. All recommendations are based on analysis of the project codebase, OpenClaw plugin SDK documentation (DeepWiki), Graphiti GitHub repository (getzep/graphiti), and agentic memory architecture best practices.*
+*Document prepared for Lead Software Engineer review. All recommendations are based on analysis of the v1.1.0 project codebase, OpenClaw plugin SDK documentation (DeepWiki), Graphiti GitHub repository (getzep/graphiti), and agentic memory architecture best practices. Rev 2.0 updated to reflect implemented changes.*
