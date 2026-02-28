@@ -154,7 +154,7 @@ export class MemoryScorer {
       const tier = this.config.defaultTier;
       const actionMap = { explicit: 'store_explicit', silent: 'store_silent', ephemeral: 'store_ephemeral' } as const;
       return {
-        score: tier === 'explicit' ? 9 : tier === 'silent' ? 5 : 2,
+        score: tier === 'explicit' ? 9 : tier === 'silent' ? 6 : 3,
         tier,
         reasoning: `Scoring disabled – defaulting to ${tier}`,
         recommendedAction: actionMap[tier]

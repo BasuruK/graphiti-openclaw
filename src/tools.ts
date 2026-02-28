@@ -1,5 +1,5 @@
 /**
- * Graphiti Memory Tools for OpenClaw
+ * Nuron Memory Tools for OpenClaw
  *
  * Registers memory management tools that users can call directly:
  * - memory_recall: Search memories
@@ -346,5 +346,5 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }
   }, { name: 'memory_analyze' });
 
-  console.log('[graphiti-memory] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, memory_consolidate, memory_analyze');
+  console.log('[nuron] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, memory_consolidate, memory_analyze');
 }
