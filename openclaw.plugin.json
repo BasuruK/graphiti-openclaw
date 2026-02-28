@@ -16,8 +16,8 @@
       },
       "endpoint": {
         "type": "string",
-        "default": "http://localhost:8000",
-        "description": "Graphiti MCP server endpoint (for graphiti-mcp backend)"
+        "default": "http://localhost:8000/sse",
+        "description": "Graphiti MCP server endpoint (for graphiti-mcp backend). When transport is 'sse', this should include the /sse path."
       },
       "transport": {
         "type": "string",
@@ -85,16 +85,16 @@
       "scoringExplicitThreshold": {
         "type": "number",
         "default": 8,
-        "minimum": 0,
+        "minimum": 1,
         "maximum": 10,
-        "description": "Score >= this triggers explicit storage (user notification)"
+        "description": "Score >= this triggers explicit storage (user notification). Must be strictly greater than scoringEphemeralThreshold. Runtime will reject or adjust conflicting values."
       },
       "scoringEphemeralThreshold": {
         "type": "number",
         "default": 4,
         "minimum": 0,
-        "maximum": 10,
-        "description": "Score < this triggers ephemeral (temp) storage"
+        "maximum": 9,
+        "description": "Score < this triggers ephemeral (temp) storage. Must be strictly less than scoringExplicitThreshold. Runtime will reject or adjust conflicting values."
       },
       "scoringEphemeralHours": {
         "type": "number",

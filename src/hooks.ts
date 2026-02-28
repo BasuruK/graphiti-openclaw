@@ -13,6 +13,9 @@ const MIN_MESSAGE_LENGTH = 20;
 /** Maximum messages to capture per turn */
 const MAX_CAPTURE_MESSAGES = 15;
 
+/** Module-level timestamp for throttling heartbeat maintenance */
+let lastMaintenanceAt = 0;
+
 /**
  * Register memory hooks with the OpenClaw API
  *
@@ -86,15 +89,15 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     if (!messages || !Array.isArray(messages) || messages.length === 0) return;
 
     try {
-      // Extract conversation from messages
+      // Extract conversation from messages (chronological order, take last N)
       const conversationSegments: { content: string; role: 'user' | 'assistant' }[] = [];
-      let messageCount = 0;
 
-      // Get recent messages in reverse order
-      const recentMessages = [...messages].reverse();
+      // Iterate messages in chronological order (oldest→newest)
+      // Start from the end to respect MAX_CAPTURE_MESSAGES limit
+      const startIdx = Math.max(0, messages.length - MAX_CAPTURE_MESSAGES);
 
-      for (const msg of recentMessages) {
-        if (messageCount >= MAX_CAPTURE_MESSAGES) break;
+      for (let i = startIdx; i < messages.length; i++) {
+        const msg = messages[i];
         if (!msg || typeof msg !== 'object') continue;
 
         const msgObj = msg as Record<string, any>;
@@ -123,11 +126,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
           content: text.slice(0, 500),
           role: role as 'user' | 'assistant'
         });
-        messageCount++;
       }
-
-      // Restore chronological order (oldest first)
-      conversationSegments.reverse();
 
       if (conversationSegments.length === 0) {
         console.log('[graphiti-memory] Auto-capture: No meaningful messages to capture');
@@ -205,19 +204,34 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
   api.on('heartbeat', async () => {
     if (!scoringConfig.enabled) return;
 
+    // Throttle: only run maintenance every cleanupIntervalHours
+    const intervalMs = (scoringConfig.cleanupIntervalHours ?? DEFAULT_SCORING_CONFIG.cleanupIntervalHours) * 3600000;
+    const now = Date.now();
+    if (now - lastMaintenanceAt < intervalMs) return;
+
     console.log('[graphiti-memory] Running scheduled memory maintenance...');
 
-    // Cleanup expired ephemeral memories
-    const cleanup = await scorer.cleanupExpiredMemories();
-    if (cleanup.deleted > 0) {
-      console.log(`[graphiti-memory] Cleaned up ${cleanup.deleted} expired memories`);
+    // Cleanup expired ephemeral memories (isolated)
+    try {
+      const cleanup = await scorer.cleanupExpiredMemories();
+      if (cleanup.deleted > 0) {
+        console.log(`[graphiti-memory] Cleaned up ${cleanup.deleted} expired memories`);
+      }
+    } catch (err) {
+      console.error('[graphiti-memory] Cleanup failed:', err instanceof Error ? err.message : String(err));
     }
 
-    // Process reinforcements (upgrade/downgrade)
-    const reinforcements = await scorer.processReinforcements();
-    if (reinforcements.upgraded > 0 || reinforcements.downgraded > 0) {
-      console.log(`[graphiti-memory] Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded`);
+    // Process reinforcements (isolated — runs even if cleanup failed)
+    try {
+      const reinforcements = await scorer.processReinforcements();
+      if (reinforcements.upgraded > 0 || reinforcements.downgraded > 0) {
+        console.log(`[graphiti-memory] Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded`);
+      }
+    } catch (err) {
+      console.error('[graphiti-memory] Reinforcement processing failed:', err instanceof Error ? err.message : String(err));
     }
+
+    lastMaintenanceAt = now;
   });
 
   console.log('[graphiti-memory] Hooks registered with adaptive scoring');

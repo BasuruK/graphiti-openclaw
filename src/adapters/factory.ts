@@ -86,7 +86,11 @@ export class AdapterFactory {
         if (health.healthy) {
           return adapter;
         }
+        // Health check failed — clean up the initialized adapter
+        await adapter.shutdown().catch(() => {});
       } catch (err) {
+        // initialize() may have succeeded before healthCheck threw — try shutdown
+        await adapter.shutdown().catch(() => {});
         console.warn('[AdapterFactory] Neo4j auto-detect failed:', err);
       }
     }
@@ -111,7 +115,9 @@ export class AdapterFactory {
         if (health.healthy) {
           return adapter;
         }
+        await adapter.shutdown().catch(() => {});
       } catch (err) {
+        await adapter.shutdown().catch(() => {});
         console.warn('[AdapterFactory] Graphiti MCP auto-detect failed:', err);
       }
     }
@@ -132,6 +138,7 @@ export class AdapterFactory {
         console.log('[AdapterFactory] Connected to default Neo4j instance');
         return adapter;
       }
+      await adapter.shutdown().catch(() => {});
     } catch (err) {
       console.warn('[AdapterFactory] Default Neo4j connection failed:', err);
     }
@@ -152,6 +159,7 @@ export class AdapterFactory {
         console.log('[AdapterFactory] Connected to default Graphiti MCP server');
         return adapter;
       }
+      await adapter.shutdown().catch(() => {});
     } catch (err) {
       console.warn('[AdapterFactory] Default Graphiti MCP connection failed:', err);
     }
@@ -224,7 +232,43 @@ export async function createAdapterFromConfig(
 ): Promise<MemoryAdapter> {
   // Check for new unified config format
   if (config.backend) {
-    const adapter = adapterFactory.create(config.backend as BackendConfig);
+    const backend = config.backend;
+
+    // Handle string discriminator (e.g., 'neo4j', 'graphiti-mcp')
+    if (typeof backend === 'string') {
+      switch (backend) {
+        case 'graphiti-mcp': {
+          const adapter = adapterFactory.create({
+            type: 'graphiti-mcp',
+            transport: (config.transport as 'stdio' | 'sse') || 'sse',
+            endpoint: (config.endpoint as string) || 'http://localhost:8000/sse',
+            groupId: (config.groupId as string) || 'default',
+          });
+          await adapter.initialize();
+          return adapter;
+        }
+        case 'neo4j': {
+          const neo4jConfig = (config.neo4j as Record<string, unknown>) || {};
+          const adapter = adapterFactory.create({
+            type: 'neo4j',
+            uri: (neo4jConfig.uri as string) || 'bolt://localhost:7687',
+            user: (neo4jConfig.user as string) || 'neo4j',
+            password: (neo4jConfig.password as string) || 'neo4j',
+            database: neo4jConfig.database as string | undefined,
+          });
+          await adapter.initialize();
+          return adapter;
+        }
+        case 'auto':
+          return adapterFactory.autoDetect();
+        default:
+          console.warn(`[createAdapterFromConfig] Unknown backend string '${backend}', falling back to auto-detect`);
+          return adapterFactory.autoDetect();
+      }
+    }
+
+    // Handle full BackendConfig object
+    const adapter = adapterFactory.create(backend as BackendConfig);
     await adapter.initialize();
     return adapter;
   }

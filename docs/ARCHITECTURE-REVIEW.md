@@ -89,7 +89,7 @@ The project aims to be a **pluggable memory middle-layer** that:
 
 > **⚠️ ARCHITECTURAL DECISION:** The HTTP proxy approach below has been evaluated and rejected in favor of MCP-native communication. See [Section 4](#4-architecture-decision-mcp-native-vs-http-proxy) for the full analysis.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                   OpenClaw Gateway                          │
 │                                                             │
@@ -120,7 +120,7 @@ The project aims to be a **pluggable memory middle-layer** that:
 
 ### 3.2 Target Architecture (MCP-Native)
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │                   OpenClaw Gateway                           │
 │                                                              │
@@ -169,7 +169,7 @@ The project aims to be a **pluggable memory middle-layer** that:
 
 ### 3.3 Data Flow
 
-```
+```text
 User Message ──► before_agent_start Hook
                       │
                       ├──► searchNodes(prompt) ──► Graphiti MCP
@@ -344,7 +344,7 @@ export class GraphitiMCPClient {
 ### 4.5 What the Agent Sees (Before vs After)
 
 #### BEFORE (HTTP proxy — agent sees plugin-registered wrapper tools)
-```
+```text
 Agent's tool inventory:
   ├── memory_recall       ← plugin wrapper around Graphiti's search_nodes
   ├── memory_store        ← plugin wrapper around Graphiti's add_memory  
@@ -356,7 +356,7 @@ Agent's tool inventory:
 ```
 
 #### AFTER (MCP-native — agent sees Graphiti tools directly + plugin's cognitive tools)
-```
+```text
 Agent's tool inventory:
   │
   ├── [From Graphiti MCP Server — auto-discovered]
@@ -588,7 +588,7 @@ The trailing `/mcp/` is hardcoded. If Graphiti changes its MCP endpoint path, th
 
 ### 7.3 Code Quality Issues
 
-```
+```text
 Metric                     Current        Target
 ─────────────────────────────────────────────────
 Type safety                any everywhere  Full PluginContext types
@@ -944,7 +944,7 @@ export interface RecallOptions {
 
 ### 10.2 Backend Implementations
 
-```
+```text
 src/adapters/
 ├── memory-adapter.ts        # Interface definition
 ├── graphiti-adapter.ts      # Graphiti MCP server adapter (current)
@@ -1098,7 +1098,7 @@ src/adapters/
 
 Inspired by how human brains consolidate memories during sleep:
 
-```
+```text
 ┌──────────────────────────────────────────────────────┐
 │              MEMORY CONSOLIDATION                    │
 │              (runs periodically, e.g. every 6 hours) │
@@ -1225,7 +1225,7 @@ async function assessMemoryConfidence(
 
 For OpenClaw's multi-agent architecture, memories could be shared or isolated:
 
-```
+```text
 Agent A (coder) ────┐
                     ├──► Shared Memory Graph ──► Common preferences, facts
 Agent B (writer) ───┘                          
@@ -1298,7 +1298,7 @@ async function proactiveAlerts(
 
 ### 15.1 Target Architecture (Post-Generalization)
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │                     OpenClaw Gateway                         │
 │                                                              │
@@ -1333,7 +1333,7 @@ async function proactiveAlerts(
 
 ### 15.2 Memory Lifecycle
 
-```
+```text
   User Interaction
         │
         ▼

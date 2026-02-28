@@ -72,8 +72,10 @@ export class MemoryScorer {
 
     // Validate: ephemeralThreshold must be < explicitThreshold
     if (merged.ephemeralThreshold >= merged.explicitThreshold) {
-      console.warn('[MemoryScorer] Invalid thresholds: ephemeral >= explicit. Adjusting...');
-      merged.ephemeralThreshold = Math.min(merged.ephemeralThreshold, merged.explicitThreshold - 1);
+      throw new Error(
+        `Invalid scoring thresholds: ephemeralThreshold (${merged.ephemeralThreshold}) ` +
+        `must be less than explicitThreshold (${merged.explicitThreshold})`
+      );
     }
 
     this.config = merged;
@@ -81,6 +83,8 @@ export class MemoryScorer {
 
   /**
    * Update configuration
+   * Validates threshold invariants; if thresholds are invalid,
+   * keeps existing thresholds while still applying other safe fields.
    */
   updateConfig(partial: Partial<ScoringConfig>) {
     // Merge and validate
@@ -88,8 +92,13 @@ export class MemoryScorer {
 
     // Validate threshold invariant
     if (merged.ephemeralThreshold >= merged.explicitThreshold) {
-      console.warn('[MemoryScorer] Invalid thresholds in updateConfig: ephemeral >= explicit. Ignoring update.');
-      return;
+      console.warn(
+        `[MemoryScorer] Invalid thresholds in updateConfig: ephemeralThreshold (${merged.ephemeralThreshold}) >= ` +
+        `explicitThreshold (${merged.explicitThreshold}). Keeping previous thresholds, applying other fields.`
+      );
+      // Restore thresholds from previous config but apply everything else
+      merged.ephemeralThreshold = this.config.ephemeralThreshold;
+      merged.explicitThreshold = this.config.explicitThreshold;
     }
 
     this.config = merged;
@@ -489,13 +498,19 @@ export class MemoryScorer {
   async processReinforcements(): Promise<{ upgraded: number; downgraded: number }> {
     console.log('[MemoryScorer] Processing memory reinforcements...');
 
+    let ephemeralMemories;
     try {
-      // Get all ephemeral memories
-      const ephemeralMemories = await this.adapter.list(50, 'ephemeral');
+      // Get all ephemeral memories — if this fails, we can't proceed
+      ephemeralMemories = await this.adapter.list(50, 'ephemeral');
+    } catch (err) {
+      console.error('[MemoryScorer] Failed to list ephemeral memories:', err);
+      return { upgraded: 0, downgraded: 0 };
+    }
 
-      let upgraded = 0;
+    let upgraded = 0;
 
-      for (const memory of ephemeralMemories) {
+    for (const memory of ephemeralMemories) {
+      try {
         // Check if memory has been reinforced (referenced in recent recalls)
         const related = await this.adapter.getRelated(memory.id, 1);
 
@@ -508,14 +523,14 @@ export class MemoryScorer {
           upgraded++;
           console.log(`[MemoryScorer] Upgraded ephemeral to silent: ${memory.id}`);
         }
+      } catch (err) {
+        // Log per-memory failure and continue with remaining memories
+        console.error(`[MemoryScorer] Failed to process reinforcement for memory ${memory.id}:`, err);
       }
-
-      console.log(`[MemoryScorer] Reinforcement processing complete: +${upgraded} upgraded`);
-      return { upgraded, downgraded: 0 };
-    } catch (err) {
-      console.error('[MemoryScorer] Reinforcement processing failed:', err);
-      return { upgraded: 0, downgraded: 0 };
     }
+
+    console.log(`[MemoryScorer] Reinforcement processing complete: +${upgraded} upgraded`);
+    return { upgraded, downgraded: 0 };
   }
 }
 

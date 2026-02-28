@@ -14,6 +14,20 @@
 import { Type } from '@sinclair/typebox';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 
+/** Valid memory tier values */
+const VALID_TIERS = ['explicit', 'silent', 'ephemeral', 'all'] as const;
+type MemoryTier = typeof VALID_TIERS[number];
+
+/**
+ * Validate and normalize a tier string to a valid MemoryTier.
+ * Returns 'all' for invalid or missing values.
+ */
+function normalizeTier(tier: string | undefined, defaultTier: MemoryTier = 'all'): MemoryTier {
+  if (!tier) return defaultTier;
+  const lower = tier.toLowerCase();
+  return (VALID_TIERS as readonly string[]).includes(lower) ? lower as MemoryTier : defaultTier;
+}
+
 /**
  * Register memory tools with the OpenClaw API
  * @param api - OpenClaw plugin API
@@ -34,11 +48,10 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }),
     async execute(toolCallId: string, params: { query: string; limit?: number; tier?: string }) {
       try {
-        // Clamp limit to prevent expensive queries
         const rawLimit = params.limit ?? 5;
         const limit = Math.min(Math.max(rawLimit, 1), 20);
 
-        const tier = params.tier as 'explicit' | 'silent' | 'ephemeral' | 'all' || 'all';
+        const tier = normalizeTier(params.tier, 'all');
 
         const results = await adapter.recall(params.query, { limit, tier });
 
@@ -79,7 +92,7 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }),
     async execute(toolCallId: string, params: { content: string; name?: string; tier?: string }) {
       try {
-        const tier = params.tier as 'explicit' | 'silent' | 'ephemeral' || 'silent';
+        const tier = normalizeTier(params.tier, 'silent');
 
         const id = await adapter.store(params.content, {
           tier,
@@ -114,7 +127,7 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
       try {
         const rawLimit = params.limit ?? 10;
         const limit = Math.min(Math.max(rawLimit, 1), 50);
-        const tier = params.tier as 'explicit' | 'silent' | 'ephemeral' | 'all' || 'all';
+        const tier = normalizeTier(params.tier, 'all');
 
         const memories = await adapter.list(limit, tier);
 
@@ -221,8 +234,11 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
         const hours = params.hours || 24;
         const startTime = new Date(Date.now() - hours * 3600000);
 
-        // Get recent memories
-        const recentMemories = await adapter.list(50, 'all');
+        // Get recent memories and filter to only include those within the time range
+        const allRecentMemories = await adapter.list(50, 'all');
+        const recentMemories = allRecentMemories.filter(
+          m => m.metadata.createdAt >= startTime
+        );
 
         if (recentMemories.length === 0) {
           return {
