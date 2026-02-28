@@ -93,10 +93,12 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     async execute(toolCallId: string, params: { content: string; name?: string; tier?: string }) {
       try {
         const tier = normalizeTier(params.tier, 'silent');
+        // Exclude 'all' — it's only valid for queries, not storage
+        const storageTier = tier === 'all' ? 'silent' : tier;
 
         const id = await adapter.store(params.content, {
-          tier,
-          score: tier === 'explicit' ? 9 : tier === 'silent' ? 6 : 3,
+          tier: storageTier,
+          score: storageTier === 'explicit' ? 9 : storageTier === 'silent' ? 6 : 3,
           source: 'user_explicit',
         });
 

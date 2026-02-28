@@ -6,7 +6,7 @@
  */
 
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult } from './memory-scorer.js';
+import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult, ScoringModelConfig } from './memory-scorer.js';
 
 /** Minimum message length to consider for capture */
 const MIN_MESSAGE_LENGTH = 20;
@@ -31,6 +31,18 @@ let lastMaintenanceAt = 0;
 export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
   // Initialize Memory Scorer with config
+  // Build scoring model config from plugin config (if provided)
+  let scoringModelConfig: ScoringModelConfig | undefined;
+  if (config.scoringModel && config.scoringModel.provider && config.scoringModel.provider !== 'none') {
+    scoringModelConfig = {
+      provider: config.scoringModel.provider,
+      model: config.scoringModel.model,
+      endpoint: config.scoringModel.endpoint,
+      apiKey: config.scoringModel.apiKey,
+      timeoutMs: config.scoringModel.timeoutMs,
+    };
+  }
+
   const scoringConfig: Partial<ScoringConfig> = {
     enabled: config.scoringEnabled !== false,
     explicitThreshold: config.scoringExplicitThreshold ?? DEFAULT_SCORING_CONFIG.explicitThreshold,
@@ -39,7 +51,11 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     defaultSilentDays: config.scoringSilentDays ?? DEFAULT_SCORING_CONFIG.defaultSilentDays,
     cleanupIntervalHours: config.scoringCleanupHours ?? DEFAULT_SCORING_CONFIG.cleanupIntervalHours,
     notifyOnExplicit: config.scoringNotifyExplicit !== false,
-    askBeforeDowngrade: config.scoringAskBeforeDowngrade !== false
+    askBeforeDowngrade: config.scoringAskBeforeDowngrade !== false,
+    minConversationLength: config.scoringMinConversationLength ?? DEFAULT_SCORING_CONFIG.minConversationLength,
+    minMessageCount: config.scoringMinMessageCount ?? DEFAULT_SCORING_CONFIG.minMessageCount,
+    defaultTier: config.scoringDefaultTier ?? DEFAULT_SCORING_CONFIG.defaultTier,
+    scoringModel: scoringModelConfig,
   };
 
   const scorer = createMemoryScorer(adapter, scoringConfig);

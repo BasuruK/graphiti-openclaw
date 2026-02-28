@@ -208,6 +208,61 @@ export default {
         type: 'boolean',
         default: true,
         description: 'Ask user before downgrading memory importance'
+      },
+
+      // Conversation gating
+      scoringMinConversationLength: {
+        type: 'number',
+        default: 50,
+        minimum: 0,
+        description: 'Minimum total character length across all messages to trigger scoring. Shorter conversations default to ephemeral.'
+      },
+      scoringMinMessageCount: {
+        type: 'number',
+        default: 1,
+        minimum: 1,
+        description: 'Minimum number of messages required to trigger scoring'
+      },
+
+      // Default tier when scoring is disabled ("dumb mode")
+      scoringDefaultTier: {
+        type: 'string',
+        enum: ['explicit', 'silent', 'ephemeral'],
+        default: 'silent',
+        description: 'Default memory tier when scoringEnabled is false ("dumb mode")'
+      },
+
+      // Local scoring model (llama.cpp / OpenAI-compatible)
+      scoringModel: {
+        type: 'object',
+        properties: {
+          provider: {
+            type: 'string',
+            enum: ['llamacpp', 'openai', 'none'],
+            default: 'none',
+            description: 'Scoring model provider. "llamacpp" for a llama.cpp server, "openai" for any OpenAI-compatible API, "none" to use built-in heuristic scoring'
+          },
+          model: {
+            type: 'string',
+            description: 'Model name sent in the API request (e.g. "qwen2.5:0.5b")'
+          },
+          endpoint: {
+            type: 'string',
+            default: 'http://localhost:8080',
+            description: 'Scoring model server URL (llama.cpp server or OpenAI-compatible endpoint)'
+          },
+          apiKey: {
+            type: 'string',
+            description: 'API key (required for openai provider, optional for llamacpp)'
+          },
+          timeoutMs: {
+            type: 'number',
+            default: 10000,
+            minimum: 1000,
+            description: 'Request timeout in milliseconds'
+          }
+        },
+        description: 'Optional local model for importance scoring instead of heuristics. Uses llama.cpp server API (OpenAI-compatible /v1/chat/completions).'
       }
     }
   },

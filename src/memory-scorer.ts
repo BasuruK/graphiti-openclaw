@@ -6,6 +6,25 @@
  */
 
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
+import type { MemoryResult } from './adapters/memory-adapter.js';
+
+/**
+ * Configuration for an optional local scoring model (llama.cpp or OpenAI-compatible).
+ * When configured, the scorer delegates importance evaluation to the LLM
+ * instead of running heuristic checks.
+ */
+export interface ScoringModelConfig {
+  /** 'llamacpp' for a llama.cpp server, 'openai' for OpenAI-compatible API, 'none' to disable */
+  provider: 'llamacpp' | 'openai' | 'none';
+  /** Model name (sent in the request body for OpenAI-compatible endpoints) */
+  model?: string;
+  /** Server endpoint, e.g. 'http://localhost:8080' */
+  endpoint?: string;
+  /** API key (required for 'openai' provider) */
+  apiKey?: string;
+  /** Request timeout in milliseconds (default: 10000) */
+  timeoutMs?: number;
+}
 
 export interface ScoringConfig {
   enabled: boolean;
@@ -16,6 +35,16 @@ export interface ScoringConfig {
   cleanupIntervalHours: number;
   notifyOnExplicit: boolean;
   askBeforeDowngrade: boolean;
+
+  // Conversation gating — skip scoring for trivial conversations
+  minConversationLength: number;  // Min total characters across all segments
+  minMessageCount: number;        // Min number of segments required
+
+  // Default tier when scoring is disabled
+  defaultTier: 'explicit' | 'silent' | 'ephemeral';
+
+  // Optional local scoring model
+  scoringModel?: ScoringModelConfig;
 }
 
 export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
@@ -26,7 +55,11 @@ export const DEFAULT_SCORING_CONFIG: ScoringConfig = {
   defaultSilentDays: 30,
   cleanupIntervalHours: 12,
   notifyOnExplicit: true,
-  askBeforeDowngrade: true
+  askBeforeDowngrade: true,
+  minConversationLength: 50,
+  minMessageCount: 1,
+  defaultTier: 'silent',
+  scoringModel: undefined,
 };
 
 export interface ScoringResult {
@@ -105,28 +138,78 @@ export class MemoryScorer {
   }
 
   /**
-   * Main scoring method - analyzes conversation and returns importance score
+   * Main scoring method - analyzes conversation and returns importance score.
+   *
+   * Optimisation notes:
+   *   1. Trivial conversations are short-circuited via minConversationLength / minMessageCount.
+   *   2. When scoring is disabled, a configurable `defaultTier` is returned immediately.
+   *   3. If a `scoringModel` is configured (llama.cpp / OpenAI-compatible), the LLM
+   *      scores the conversation in a single request — no adapter recalls needed.
+   *   4. Otherwise, a SINGLE adapter.recall() call is made and the results are shared
+   *      across repetition / context-anchoring / novelty checks (previously 3 separate calls).
    */
   async scoreConversation(segments: ConversationSegment[]): Promise<ScoringResult> {
+    // ── Disabled fast-path ──────────────────────────────────────────────
     if (!this.config.enabled) {
+      const tier = this.config.defaultTier;
+      const actionMap = { explicit: 'store_explicit', silent: 'store_silent', ephemeral: 'store_ephemeral' } as const;
       return {
-        score: 5,
-        tier: 'silent',
-        reasoning: 'Scoring disabled',
-        recommendedAction: 'store_silent'
+        score: tier === 'explicit' ? 9 : tier === 'silent' ? 5 : 2,
+        tier,
+        reasoning: `Scoring disabled – defaulting to ${tier}`,
+        recommendedAction: actionMap[tier]
       };
     }
 
     const fullContent = segments.map(s => s.content).join('\n');
 
-    // Check for explicit markers
+    // ── Conversation gating ─────────────────────────────────────────────
+    const totalLength = segments.reduce((sum, s) => sum + s.content.length, 0);
+    if (
+      totalLength < this.config.minConversationLength ||
+      segments.length < this.config.minMessageCount
+    ) {
+      // Check for explicit markers even in short messages
+      if (!this.detectExplicitMarkers(fullContent)) {
+        return {
+          score: 2,
+          tier: 'ephemeral',
+          reasoning: 'Conversation too short/trivial – skipping detailed scoring',
+          recommendedAction: 'store_ephemeral'
+        };
+      }
+    }
+
+    // ── Local model scoring (llama.cpp / OpenAI-compatible) ─────────────
+    const modelCfg = this.config.scoringModel;
+    if (modelCfg && modelCfg.provider !== 'none') {
+      try {
+        return await this.scoreWithLocalModel(fullContent, segments, modelCfg);
+      } catch (err) {
+        console.warn('[MemoryScorer] Local model scoring failed, falling back to heuristics:', err);
+        // Fall through to heuristic scoring
+      }
+    }
+
+    // ── Heuristic scoring (single recall call) ──────────────────────────
     const hasExplicit = this.detectExplicitMarkers(fullContent);
     const emotionalWeight = this.detectEmotionalContent(fullContent);
-    const repetitionScore = await this.checkRepetition(segments);
-    const contextAnchoring = await this.checkContextAnchoring(fullContent);
     const timeSensitivity = this.detectTimeSensitivity(fullContent);
-    const novelty = await this.checkNovelty(fullContent);
     const futureUtility = await this.predictFutureUtility(fullContent, segments);
+
+    // ** SINGLE recall call — results shared across 3 checks **
+    let recallResults: MemoryResult[] = [];
+    try {
+      if (fullContent.length >= 20) {
+        recallResults = await this.adapter.recall(fullContent, { limit: 10 });
+      }
+    } catch (err) {
+      console.warn('[MemoryScorer] Batch recall failed:', err);
+    }
+
+    const repetitionScore = this.checkRepetitionFromResults(recallResults, segments);
+    const contextAnchoring = this.checkContextAnchoringFromResults(recallResults);
+    const novelty = this.checkNoveltyFromResults(recallResults, fullContent);
 
     // Calculate weighted score
     let score = this.calculateWeightedScore({
@@ -224,51 +307,29 @@ export class MemoryScorer {
   }
 
   /**
-   * Check if similar content has been mentioned before
-   * FIXED: Actually queries the adapter for existing memories
+   * Check if similar content has been mentioned before.
+   * Uses pre-fetched recall results (no separate adapter call).
    */
-  private async checkRepetition(segments: ConversationSegment[]): Promise<number> {
+  private checkRepetitionFromResults(results: MemoryResult[], segments: ConversationSegment[]): number {
     const content = segments.map(s => s.content).join(' ');
     if (!content || content.length < 20) return 0;
+    if (results.length === 0) return 0;
 
-    try {
-      const results = await this.adapter.recall(content, { limit: 10 });
-      if (results.length === 0) return 0;
-
-      // Calculate semantic similarity
-      // More similar memories = more repetition = lower importance for new storage
-      // Return score 0-10 (high repetition = high score)
-      const similaritySum = results.reduce((sum, r) => sum + r.relevanceScore, 0);
-      const avgSimilarity = similaritySum / results.length;
-
-      return Math.round(avgSimilarity * 10);
-    } catch (err) {
-      console.warn('[MemoryScorer] Repetition check failed:', err);
-      return 3; // Default middle score on error
-    }
+    const similaritySum = results.reduce((sum, r) => sum + r.relevanceScore, 0);
+    const avgSimilarity = similaritySum / results.length;
+    return Math.round(avgSimilarity * 10);
   }
 
   /**
-   * Check if content connects to existing high-value memories
-   * FIXED: Actually queries the adapter
+   * Check if content connects to existing high-value memories.
+   * Uses pre-fetched recall results (no separate adapter call).
    */
-  private async checkContextAnchoring(content: string): Promise<number> {
-    if (!content || content.length < 20) return 0;
+  private checkContextAnchoringFromResults(results: MemoryResult[]): number {
+    if (results.length === 0) return 0;
 
-    try {
-      const results = await this.adapter.recall(content, { limit: 10 });
-      if (results.length === 0) return 0;
-
-      // Check for explicit tier memories (high-value)
-      const explicitCount = results.filter(r => r.metadata.tier === 'explicit').length;
-      const silentCount = results.filter(r => r.metadata.tier === 'silent').length;
-
-      // More related memories = stronger anchoring = higher importance
-      return Math.min(explicitCount * 3 + silentCount * 2, 10);
-    } catch (err) {
-      console.warn('[MemoryScorer] Context anchoring check failed:', err);
-      return 3;
-    }
+    const explicitCount = results.filter(r => r.metadata.tier === 'explicit').length;
+    const silentCount = results.filter(r => r.metadata.tier === 'silent').length;
+    return Math.min(explicitCount * 3 + silentCount * 2, 10);
   }
 
   /**
@@ -302,26 +363,16 @@ export class MemoryScorer {
   }
 
   /**
-   * FIXED: Check if content is novel or already known
-   * Now actually compares against existing memories
+   * Check if content is novel or already known.
+   * Uses pre-fetched recall results (no separate adapter call).
    */
-  private async checkNovelty(content: string): Promise<number> {
+  private checkNoveltyFromResults(results: MemoryResult[], content: string): number {
     if (!content || content.length < 20) return 5;
+    if (results.length === 0) return 10; // Completely novel
 
-    try {
-      const results = await this.adapter.recall(content, { limit: 5 });
-      if (results.length === 0) return 10; // Completely novel
-
-      // Calculate average similarity
-      const similaritySum = results.reduce((sum, r) => sum + r.relevanceScore, 0);
-      const avgSimilarity = similaritySum / results.length;
-
-      // Novelty is inverse of similarity
-      return Math.round((1 - avgSimilarity) * 10);
-    } catch (err) {
-      console.warn('[MemoryScorer] Novelty check failed:', err);
-      return 5; // Default to medium novelty
-    }
+    const similaritySum = results.reduce((sum, r) => sum + r.relevanceScore, 0);
+    const avgSimilarity = similaritySum / results.length;
+    return Math.round((1 - avgSimilarity) * 10);
   }
 
   /**
@@ -440,6 +491,101 @@ export class MemoryScorer {
     if (tier === 'explicit' || hasExplicit) return 'store_explicit';
     if (tier === 'silent') return 'store_silent';
     return 'store_ephemeral';
+  }
+
+  // ─── Local Model Scoring (llama.cpp / OpenAI-compatible) ──────────────
+
+  /**
+   * Score a conversation using a local LLM via llama.cpp or OpenAI-compatible API.
+   *
+   * Sends a structured prompt and expects a JSON response with score/tier/reasoning.
+   * Falls back to heuristic scoring on any failure.
+   */
+  private async scoreWithLocalModel(
+    fullContent: string,
+    segments: ConversationSegment[],
+    modelCfg: ScoringModelConfig
+  ): Promise<ScoringResult> {
+    const endpoint = modelCfg.endpoint || 'http://localhost:8080';
+    const timeoutMs = modelCfg.timeoutMs ?? 10_000;
+
+    // Build the scoring prompt
+    const systemPrompt = [
+      'You are a memory importance scorer. Analyze the conversation and decide how important it is to remember long-term.',
+      'Return ONLY a JSON object (no markdown, no explanation outside the JSON) with these exact fields:',
+      '  { "score": <number 0-10>, "tier": "explicit" | "silent" | "ephemeral", "reasoning": "<short string>" }',
+      '',
+      'Scoring guidelines:',
+      `  - score >= ${this.config.explicitThreshold} → tier "explicit" (user preferences, critical facts, explicit requests to remember)`,
+      `  - score >= ${this.config.ephemeralThreshold} and < ${this.config.explicitThreshold} → tier "silent" (moderately useful information)`,
+      `  - score < ${this.config.ephemeralThreshold} → tier "ephemeral" (greetings, trivial chatter, low-value)`,
+    ].join('\n');
+
+    const conversationText = segments
+      .map(s => `${s.role}: ${s.content}`)
+      .join('\n');
+
+    const userPrompt = `Score this conversation:\n\n${conversationText}`;
+
+    // Both llama.cpp server and OpenAI expose /v1/chat/completions
+    const url = `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (modelCfg.apiKey) {
+      headers['Authorization'] = `Bearer ${modelCfg.apiKey}`;
+    }
+
+    const body = {
+      model: modelCfg.model || 'default',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ],
+      temperature: 0.1,
+      max_tokens: 256,
+      // llama.cpp-specific: request JSON grammar output
+      response_format: { type: 'json_object' },
+    };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        throw new Error(`Local scoring model returned HTTP ${res.status}: ${await res.text()}`);
+      }
+
+      const json: any = await res.json();
+      const content = json?.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Empty response from scoring model');
+
+      // Parse the JSON response (tolerate markdown fences)
+      const cleaned = content.replace(/```json\n?|```\n?/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+
+      const rawScore = Math.max(0, Math.min(10, Math.round(Number(parsed.score) || 5)));
+      const tier = this.determineTier(rawScore);
+      const expiresInHours = tier === 'ephemeral' ? this.config.defaultEphemeralHours :
+                             tier === 'silent' ? this.config.defaultSilentDays * 24 : undefined;
+
+      const hasExplicit = this.detectExplicitMarkers(fullContent);
+
+      return {
+        score: rawScore,
+        tier,
+        reasoning: `[LLM] ${parsed.reasoning || 'No reasoning provided'}`,
+        expiresInHours,
+        recommendedAction: this.determineAction(tier, hasExplicit),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
