@@ -1,5 +1,5 @@
 /**
- * Graphiti Memory Plugin for OpenClaw
+ * Nuron Memory Plugin for OpenClaw
  *
  * A temporal knowledge graph memory system that provides:
  * - Native memory tools (recall, store, forget, status, list, consolidate, analyze)
@@ -10,6 +10,8 @@
  * Uses pluggable backends: Graphiti MCP server, Neo4j direct, etc.
  *
  * ## Upgrade Notes
+ * - v2.0.0: Plugin renamed from 'graphiti-memory' to 'nuron'.
+ *   Legacy IDs ('graphiti', 'graphiti-memory') are auto-migrated on startup.
  * - v1.1.0: Plugin ID renamed from 'graphiti' to 'graphiti-memory'.
  *   On startup, any persisted config keyed under the old ID is automatically
  *   migrated to the new ID. No manual intervention is needed.
@@ -22,7 +24,7 @@ import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import type { BackendConfig } from './adapters/memory-adapter.js';
 
 /** Previous plugin IDs for migration compatibility */
-const LEGACY_PLUGIN_IDS = ['graphiti'];
+const LEGACY_PLUGIN_IDS = ['graphiti', 'graphiti-memory'];
 
 /**
  * Migrate settings persisted under a legacy plugin ID to the current one.
@@ -38,7 +40,7 @@ function migratePluginSettings(api: any, currentId: string): void {
 
       const oldSettings = typeof store.get === 'function' ? store.get(oldId) : undefined;
       if (oldSettings) {
-        console.log(`[graphiti-memory] Migrating persisted settings from legacy ID '${oldId}' to '${currentId}'`);
+        console.log(`[nuron] Migrating persisted settings from legacy ID '${oldId}' to '${currentId}'`);
         if (typeof store.set === 'function') {
           store.set(currentId, oldSettings);
         }
@@ -47,7 +49,7 @@ function migratePluginSettings(api: any, currentId: string): void {
         }
       }
     } catch (err) {
-      console.warn(`[graphiti-memory] Settings migration from '${oldId}' failed:`, err instanceof Error ? err.message : String(err));
+      console.warn(`[nuron] Settings migration from '${oldId}' failed:`, err instanceof Error ? err.message : String(err));
     }
   }
 }
@@ -62,36 +64,59 @@ function validateScoringConfig(config: Record<string, unknown>): void {
   const explicitThreshold = config.scoringExplicitThreshold as number | undefined;
 
   if (ephemeralThreshold != null && ephemeralThreshold < 0) {
-    console.warn('[graphiti-memory] scoringEphemeralThreshold must be >= 0, clamping to 0');
+    console.warn('[nuron] scoringEphemeralThreshold must be >= 0, clamping to 0');
     config.scoringEphemeralThreshold = 0;
   }
   if (explicitThreshold != null && ephemeralThreshold != null && explicitThreshold <= ephemeralThreshold) {
-    console.warn('[graphiti-memory] scoringExplicitThreshold must be > scoringEphemeralThreshold, adjusting');
+    console.warn('[nuron] scoringExplicitThreshold must be > scoringEphemeralThreshold, adjusting');
     config.scoringExplicitThreshold = (ephemeralThreshold as number) + 1;
   }
   if (config.scoringEphemeralHours != null && (config.scoringEphemeralHours as number) < 1) {
-    console.warn('[graphiti-memory] scoringEphemeralHours must be >= 1, clamping to 1');
+    console.warn('[nuron] scoringEphemeralHours must be >= 1, clamping to 1');
     config.scoringEphemeralHours = 1;
   }
   if (config.scoringSilentDays != null && (config.scoringSilentDays as number) < 1) {
-    console.warn('[graphiti-memory] scoringSilentDays must be >= 1, clamping to 1');
+    console.warn('[nuron] scoringSilentDays must be >= 1, clamping to 1');
     config.scoringSilentDays = 1;
   }
   if (config.scoringCleanupHours != null && (config.scoringCleanupHours as number) < 1) {
-    console.warn('[graphiti-memory] scoringCleanupHours must be >= 1, clamping to 1');
+    console.warn('[nuron] scoringCleanupHours must be >= 1, clamping to 1');
     config.scoringCleanupHours = 1;
+  }
+
+  // Validate scoringModel.endpoint URL
+  const scoringModel = config.scoringModel as Record<string, unknown> | undefined;
+  if (scoringModel && scoringModel.provider !== 'none') {
+    const endpoint = (scoringModel.endpoint as string) || 'http://localhost:8080';
+    try {
+      const parsed = new URL(endpoint);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        throw new Error(`unsupported protocol "${parsed.protocol}"`);
+      }
+      if (!parsed.hostname) {
+        throw new Error('missing hostname');
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `[nuron] Invalid scoringModel.endpoint "${endpoint}": ${msg}. ` +
+        `Expected a valid HTTP/HTTPS URL (e.g. "http://localhost:8080"). ` +
+        `Check your scoringModel config: provider=${scoringModel.provider}, model=${scoringModel.model ?? '(default)'}, endpoint=${endpoint}`
+      );
+    }
   }
 }
 
 export default {
-  id: 'graphiti-memory',
+  id: 'nuron',
   /** Legacy IDs for migration compatibility */
   legacyIds: LEGACY_PLUGIN_IDS,
-  name: 'Graphiti Memory',
+  name: 'Nuron',
   description: 'Temporal knowledge graph memory for OpenClaw with adaptive importance scoring',
 
   configSchema: {
     type: 'object',
+    additionalProperties: false,
     properties: {
       // Backend configuration
       backend: {
@@ -208,6 +233,62 @@ export default {
         type: 'boolean',
         default: true,
         description: 'Ask user before downgrading memory importance'
+      },
+
+      // Conversation gating
+      scoringMinConversationLength: {
+        type: 'number',
+        default: 50,
+        minimum: 0,
+        description: 'Minimum total character length across all messages to trigger scoring. Shorter conversations default to ephemeral.'
+      },
+      scoringMinMessageCount: {
+        type: 'number',
+        default: 1,
+        minimum: 1,
+        description: 'Minimum number of messages required to trigger scoring'
+      },
+
+      // Default tier when scoring is disabled ("dumb mode")
+      scoringDefaultTier: {
+        type: 'string',
+        enum: ['explicit', 'silent', 'ephemeral'],
+        default: 'silent',
+        description: 'Default memory tier when scoringEnabled is false ("dumb mode")'
+      },
+
+      // Local scoring model (llama.cpp / OpenAI-compatible)
+      scoringModel: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          provider: {
+            type: 'string',
+            enum: ['llamacpp', 'openai', 'none'],
+            default: 'none',
+            description: 'Scoring model provider. "llamacpp" for a llama.cpp server, "openai" for any OpenAI-compatible API, "none" to use built-in heuristic scoring'
+          },
+          model: {
+            type: 'string',
+            description: 'Model name sent in the API request (e.g. "qwen2.5:0.5b")'
+          },
+          endpoint: {
+            type: 'string',
+            default: 'http://localhost:8080',
+            description: 'Scoring model server URL (llama.cpp server or OpenAI-compatible endpoint)'
+          },
+          apiKey: {
+            type: 'string',
+            description: 'API key (required for openai provider, optional for llamacpp)'
+          },
+          timeoutMs: {
+            type: 'number',
+            default: 10000,
+            minimum: 1000,
+            description: 'Request timeout in milliseconds'
+          }
+        },
+        description: 'Optional local model for importance scoring instead of heuristics. Uses llama.cpp server API (OpenAI-compatible /v1/chat/completions).'
       }
     }
   },
@@ -216,7 +297,7 @@ export default {
     const config = api?.pluginConfig ?? {};
 
     // Migrate settings from legacy plugin IDs
-    migratePluginSettings(api, 'graphiti-memory');
+    migratePluginSettings(api, 'nuron');
 
     // Validate and coerce scoring config
     validateScoringConfig(config);
@@ -230,7 +311,7 @@ export default {
       autoRecall: config.autoRecall,
       scoringEnabled: config.scoringEnabled
     };
-    console.log('[graphiti-memory] Registering plugin with config:', safeConfig);
+    console.log('[nuron] Registering plugin with config:', safeConfig);
 
     // Create adapter based on configuration
     let adapter: MemoryAdapter;
@@ -240,7 +321,7 @@ export default {
       const backendType = config.backend || 'auto';
 
       if (backendType === 'auto') {
-        console.log('[graphiti-memory] Auto-detecting memory backend...');
+        console.log('[nuron] Auto-detecting memory backend...');
         // Map plugin config to BackendConfig shape for auto-detection
         const backendConfig: Partial<BackendConfig> = {};
         if (config.endpoint) (backendConfig as any).endpoint = config.endpoint;
@@ -248,7 +329,7 @@ export default {
         if (config.groupId) (backendConfig as any).groupId = config.groupId;
         adapter = await adapterFactory.autoDetect(backendConfig);
       } else if (backendType === 'graphiti-mcp') {
-        console.log('[graphiti-memory] Using Graphiti MCP backend...');
+        console.log('[nuron] Using Graphiti MCP backend...');
         adapter = adapterFactory.create({
           type: 'graphiti-mcp',
           transport: config.transport || 'sse',
@@ -256,7 +337,7 @@ export default {
           groupId: config.groupId || 'default'
         });
       } else if (backendType === 'neo4j') {
-        console.log('[graphiti-memory] Using Neo4j backend...');
+        console.log('[nuron] Using Neo4j backend...');
         const neo4jConfig = config.neo4j || {};
         adapter = adapterFactory.create({
           type: 'neo4j',
@@ -275,13 +356,13 @@ export default {
       // Verify connection
       const health = await adapter.healthCheck();
       if (!health.healthy) {
-        console.warn('[graphiti-memory] Warning: Memory backend not healthy:', health.details);
+        console.warn('[nuron] Warning: Memory backend not healthy:', health.details);
       } else {
-        console.log(`[graphiti-memory] Connected to ${health.backend} backend`);
+        console.log(`[nuron] Connected to ${health.backend} backend`);
       }
 
     } catch (err) {
-      console.error('[graphiti-memory] Failed to initialize memory backend:', err instanceof Error ? err.message : String(err));
+      console.error('[nuron] Failed to initialize memory backend:', err instanceof Error ? err.message : String(err));
       throw err;
     }
 
@@ -294,11 +375,11 @@ export default {
     // Register shutdown handler if the host API supports it
     const shutdownHandler = async () => {
       try {
-        console.log('[graphiti-memory] Shutting down...');
+        console.log('[nuron] Shutting down...');
         await adapter.shutdown();
-        console.log('[graphiti-memory] Shutdown complete');
+        console.log('[nuron] Shutdown complete');
       } catch (err) {
-        console.error('[graphiti-memory] Shutdown error:', err instanceof Error ? err.message : String(err));
+        console.error('[nuron] Shutdown error:', err instanceof Error ? err.message : String(err));
       }
     };
 
@@ -308,6 +389,6 @@ export default {
       api.on('shutdown', shutdownHandler);
     }
 
-    console.log('[graphiti-memory] Plugin registered successfully with Memory Cortex');
+    console.log('[nuron] Plugin registered successfully with Memory Cortex');
   }
 };

@@ -1,4 +1,4 @@
-# Graphiti Memory Plugin - Complete
+# Nuron Memory Plugin - Complete
 
 ## What's Ready
 

@@ -1,7 +1,7 @@
 {
-  "name": "@basuru/graphiti-memory",
-  "version": "1.1.0",
-  "description": "Graphiti temporal knowledge graph memory for OpenClaw with Memory Cortex adaptive importance scoring",
+  "name": "@basuruk/nuron",
+  "version": "2.0.0",
+  "description": "Nuron - temporal knowledge graph memory for OpenClaw with Memory Cortex adaptive importance scoring",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -40,7 +40,7 @@
   "keywords": [
     "openclaw",
     "memory",
-    "graphiti",
+    "nuron",
     "knowledge-graph",
     "neo4j",
     "ai-agent",
@@ -51,6 +51,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/basuru/graphiti-openclaw"
+    "url": "https://github.com/basuruk/nuron"
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Graphiti Memory Tools for OpenClaw
+ * Nuron Memory Tools for OpenClaw
  *
  * Registers memory management tools that users can call directly:
  * - memory_recall: Search memories
@@ -93,16 +93,18 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     async execute(toolCallId: string, params: { content: string; name?: string; tier?: string }) {
       try {
         const tier = normalizeTier(params.tier, 'silent');
+        // Exclude 'all' — it's only valid for queries, not storage
+        const storageTier = tier === 'all' ? 'silent' : tier;
 
         const id = await adapter.store(params.content, {
-          tier,
-          score: tier === 'explicit' ? 9 : tier === 'silent' ? 6 : 3,
+          tier: storageTier,
+          score: storageTier === 'explicit' ? 9 : storageTier === 'silent' ? 6 : 3,
           source: 'user_explicit',
         });
 
         return {
-          content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${tier}` }],
-          details: { id, tier }
+          content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${storageTier}` }],
+          details: { id, tier: storageTier }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -344,5 +346,5 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }
   }, { name: 'memory_analyze' });
 
-  console.log('[graphiti-memory] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, memory_consolidate, memory_analyze');
+  console.log('[nuron] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, memory_consolidate, memory_analyze');
 }
