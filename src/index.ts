@@ -260,6 +260,7 @@ export default {
       // Local scoring model (llama.cpp / OpenAI-compatible)
       scoringModel: {
         type: 'object',
+        additionalProperties: false,
         properties: {
           provider: {
             type: 'string',
