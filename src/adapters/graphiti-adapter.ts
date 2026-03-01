@@ -33,7 +33,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     this.config = config;
     // @ts-ignore - MCP SDK type changes
     this.client = new Client(
-      { name: 'graphiti-memory-cortex', version: '1.0.0' },
+      { name: 'nuron', version: '1.0.0' },
       { capabilities: {} }
     );
   }

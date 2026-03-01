@@ -1,12 +1,12 @@
 /**
- * Graphiti Memory Hooks for OpenClaw
+ * Nuron Memory Hooks for OpenClaw
  *
  * Provides auto-recall, auto-capture, and adaptive importance scoring functionality.
  * Now uses MemoryAdapter interface for backend-agnostic operation.
  */
 
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult } from './memory-scorer.js';
+import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult, ScoringModelConfig } from './memory-scorer.js';
 
 /** Minimum message length to consider for capture */
 const MIN_MESSAGE_LENGTH = 20;
@@ -31,6 +31,18 @@ let lastMaintenanceAt = 0;
 export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
   // Initialize Memory Scorer with config
+  // Build scoring model config from plugin config (if provided)
+  let scoringModelConfig: ScoringModelConfig | undefined;
+  if (config.scoringModel && config.scoringModel.provider && config.scoringModel.provider !== 'none') {
+    scoringModelConfig = {
+      provider: config.scoringModel.provider,
+      model: config.scoringModel.model,
+      endpoint: config.scoringModel.endpoint,
+      apiKey: config.scoringModel.apiKey,
+      timeoutMs: config.scoringModel.timeoutMs,
+    };
+  }
+
   const scoringConfig: Partial<ScoringConfig> = {
     enabled: config.scoringEnabled !== false,
     explicitThreshold: config.scoringExplicitThreshold ?? DEFAULT_SCORING_CONFIG.explicitThreshold,
@@ -39,7 +51,11 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     defaultSilentDays: config.scoringSilentDays ?? DEFAULT_SCORING_CONFIG.defaultSilentDays,
     cleanupIntervalHours: config.scoringCleanupHours ?? DEFAULT_SCORING_CONFIG.cleanupIntervalHours,
     notifyOnExplicit: config.scoringNotifyExplicit !== false,
-    askBeforeDowngrade: config.scoringAskBeforeDowngrade !== false
+    askBeforeDowngrade: config.scoringAskBeforeDowngrade !== false,
+    minConversationLength: config.scoringMinConversationLength ?? DEFAULT_SCORING_CONFIG.minConversationLength,
+    minMessageCount: config.scoringMinMessageCount ?? DEFAULT_SCORING_CONFIG.minMessageCount,
+    defaultTier: config.scoringDefaultTier ?? DEFAULT_SCORING_CONFIG.defaultTier,
+    scoringModel: scoringModelConfig,
   };
 
   const scorer = createMemoryScorer(adapter, scoringConfig);
@@ -52,7 +68,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     if (!prompt || prompt.length < config.minPromptLength) return;
 
     try {
-      console.log('[graphiti-memory] Auto-recall: Searching for relevant context...');
+      console.log('[nuron] Auto-recall: Searching for relevant context...');
 
       const results = await adapter.recall(prompt, {
         limit: config.recallMaxFacts || 5,
@@ -60,7 +76,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       });
 
       if (!results || results.length === 0) {
-        console.log('[graphiti-memory] Auto-recall: No relevant memories found');
+        console.log('[nuron] Auto-recall: No relevant memories found');
         return;
       }
 
@@ -69,14 +85,14 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
         .map((r, i) => `• ${r.summary || r.content.substring(0, 100)}`)
         .join('\n');
 
-      console.log(`[graphiti-memory] Auto-recall: Found ${results.length} relevant memories`);
+      console.log(`[nuron] Auto-recall: Found ${results.length} relevant memories`);
 
       // Inject context via prependContext
       return {
         prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>`
       };
     } catch (err) {
-      console.error('[graphiti-memory] Auto-recall error:', err instanceof Error ? err.message : String(err));
+      console.error('[nuron] Auto-recall error:', err instanceof Error ? err.message : String(err));
       // Don't fail - continue without memory
     }
   });
@@ -129,7 +145,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       }
 
       if (conversationSegments.length === 0) {
-        console.log('[graphiti-memory] Auto-capture: No meaningful messages to capture');
+        console.log('[nuron] Auto-capture: No meaningful messages to capture');
         return;
       }
 
@@ -140,37 +156,37 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       // ============================================================
 
       if (scoringConfig.enabled) {
-        console.log('[graphiti-memory] Scoring conversation for importance...');
+        console.log('[nuron] Scoring conversation for importance...');
 
         const scoreResult = await scorer.scoreConversation(conversationSegments);
 
-        console.log(`[graphiti-memory] Score: ${scoreResult.score}/10 (${scoreResult.tier})`);
-        console.log(`[graphiti-memory] Reasoning: ${scoreResult.reasoning}`);
-        console.log(`[graphiti-memory] Action: ${scoreResult.recommendedAction}`);
+        console.log(`[nuron] Score: ${scoreResult.score}/10 (${scoreResult.tier})`);
+        console.log(`[nuron] Reasoning: ${scoreResult.reasoning}`);
+        console.log(`[nuron] Action: ${scoreResult.recommendedAction}`);
 
         // Handle based on recommended action
         switch (scoreResult.recommendedAction) {
           case 'skip':
-            console.log('[graphiti-memory] Skipping capture - low importance');
+            console.log('[nuron] Skipping capture - low importance');
             return;
 
           case 'store_ephemeral':
-            console.log('[graphiti-memory] Storing as ephemeral (short-term)');
+            console.log('[nuron] Storing as ephemeral (short-term)');
             await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
             return;
 
           case 'store_silent':
-            console.log('[graphiti-memory] Storing as silent (medium importance)');
+            console.log('[nuron] Storing as silent (medium importance)');
             await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
             return;
 
           case 'store_explicit':
-            console.log('[graphiti-memory] Storing as explicit (high importance)');
+            console.log('[nuron] Storing as explicit (high importance)');
             await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
 
             // Optional: Notify user if configured
             if (scoringConfig.notifyOnExplicit) {
-              console.log('[graphiti-memory] Would notify user: "Got it, noting that"');
+              console.log('[nuron] Would notify user: "Got it, noting that"');
             }
             return;
         }
@@ -181,7 +197,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
         .map(s => `${s.role}: ${s.content}`)
         .join('\n\n');
 
-      console.log(`[graphiti-memory] Auto-capturing ${conversationSegments.length} messages`);
+      console.log(`[nuron] Auto-capturing ${conversationSegments.length} messages`);
 
       await adapter.store(
         `[Session ${sessionId}]\n${conversation}`,
@@ -193,9 +209,9 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
         }
       );
 
-      console.log('[graphiti-memory] Auto-capture: Conversation stored successfully');
+      console.log('[nuron] Auto-capture: Conversation stored successfully');
     } catch (err) {
-      console.error('[graphiti-memory] Auto-capture error:', err instanceof Error ? err.message : String(err));
+      console.error('[nuron] Auto-capture error:', err instanceof Error ? err.message : String(err));
       // Don't fail - continue normally
     }
   });
@@ -209,32 +225,32 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     const now = Date.now();
     if (now - lastMaintenanceAt < intervalMs) return;
 
-    console.log('[graphiti-memory] Running scheduled memory maintenance...');
+    console.log('[nuron] Running scheduled memory maintenance...');
 
     // Cleanup expired ephemeral memories (isolated)
     try {
       const cleanup = await scorer.cleanupExpiredMemories();
       if (cleanup.deleted > 0) {
-        console.log(`[graphiti-memory] Cleaned up ${cleanup.deleted} expired memories`);
+        console.log(`[nuron] Cleaned up ${cleanup.deleted} expired memories`);
       }
     } catch (err) {
-      console.error('[graphiti-memory] Cleanup failed:', err instanceof Error ? err.message : String(err));
+      console.error('[nuron] Cleanup failed:', err instanceof Error ? err.message : String(err));
     }
 
     // Process reinforcements (isolated — runs even if cleanup failed)
     try {
       const reinforcements = await scorer.processReinforcements();
       if (reinforcements.upgraded > 0 || reinforcements.downgraded > 0) {
-        console.log(`[graphiti-memory] Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded`);
+        console.log(`[nuron] Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded`);
       }
     } catch (err) {
-      console.error('[graphiti-memory] Reinforcement processing failed:', err instanceof Error ? err.message : String(err));
+      console.error('[nuron] Reinforcement processing failed:', err instanceof Error ? err.message : String(err));
     }
 
     lastMaintenanceAt = now;
   });
 
-  console.log('[graphiti-memory] Hooks registered with adaptive scoring');
+  console.log('[nuron] Hooks registered with adaptive scoring');
 }
 
 /**
@@ -272,7 +288,7 @@ async function storeWithMetadata(
   await adapter.store(conversation, metadata);
 
   // Log the stored metadata
-  console.log(`[graphiti-memory] Stored with metadata:`, {
+  console.log(`[nuron] Stored with metadata:`, {
     tier: scoreResult.tier,
     score: scoreResult.score,
     expiresInHours: scoreResult.expiresInHours,
