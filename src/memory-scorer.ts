@@ -156,7 +156,7 @@ export class MemoryScorer {
       return {
         score: tier === 'explicit' ? 9 : tier === 'silent' ? 6 : 3,
         tier,
-        reasoning: `Scoring disabled – defaulting to ${tier}`,
+        reasoning: `Scoring disabled \\u2013 defaulting to ${tier}`,
         recommendedAction: actionMap[tier]
       };
     }

@@ -1,5 +1,5 @@
 {
-  "name": "@basuru/nuron",
+  "name": "@basuruk/nuron",
   "version": "2.0.0",
   "description": "Nuron - temporal knowledge graph memory for OpenClaw with Memory Cortex adaptive importance scoring",
   "type": "module",
@@ -51,6 +51,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/basuru/graphiti-openclaw"
+    "url": "https://github.com/basuruk/nuron"
   }
 }
