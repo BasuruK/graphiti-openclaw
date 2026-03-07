@@ -5,8 +5,14 @@
  * Now uses MemoryAdapter interface for backend-agnostic operation.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult, ScoringModelConfig } from './memory-scorer.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /** Minimum message length to consider for capture */
 const MIN_MESSAGE_LENGTH = 20;
@@ -87,9 +93,19 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
       console.log(`[nuron] Auto-recall: Found ${results.length} relevant memories`);
 
+      let memoryInstructions = '';
+      try {
+          const memoryMdPath = path.resolve(__dirname, '../../MEMORY.md');
+          if (fs.existsSync(memoryMdPath)) {
+            memoryInstructions = fs.readFileSync(memoryMdPath, 'utf-8');
+          }
+      } catch (err) {
+          console.error('[nuron] Could not load MEMORY.md instructions:', err);
+      }
+
       // Inject context via prependContext
       return {
-        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>`
+        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>\n\n<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`
       };
     } catch (err) {
       console.error('[nuron] Auto-recall error:', err instanceof Error ? err.message : String(err));
@@ -152,64 +168,13 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       const sessionId = event.sessionId || 'unknown';
 
       // ============================================================
-      // ADAPTIVE SCORING: Analyze conversation and determine importance
+      // NOTE: Adaptive scoring is now handled natively by the OpenClaw
+      // LLM agent via the MEMORY.md system prompt instructions.
+      // The agent will silently invoke the memory_store tool directly.
+      // Therefore, we no longer need to auto-capture aggressively here.
       // ============================================================
+      console.log('[nuron] Auto-capture disabled: delegating to native OpenClaw LLM classification via MCP tools.');
 
-      if (scoringConfig.enabled) {
-        console.log('[nuron] Scoring conversation for importance...');
-
-        const scoreResult = await scorer.scoreConversation(conversationSegments);
-
-        console.log(`[nuron] Score: ${scoreResult.score}/10 (${scoreResult.tier})`);
-        console.log(`[nuron] Reasoning: ${scoreResult.reasoning}`);
-        console.log(`[nuron] Action: ${scoreResult.recommendedAction}`);
-
-        // Handle based on recommended action
-        switch (scoreResult.recommendedAction) {
-          case 'skip':
-            console.log('[nuron] Skipping capture - low importance');
-            return;
-
-          case 'store_ephemeral':
-            console.log('[nuron] Storing as ephemeral (short-term)');
-            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
-            return;
-
-          case 'store_silent':
-            console.log('[nuron] Storing as silent (medium importance)');
-            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
-            return;
-
-          case 'store_explicit':
-            console.log('[nuron] Storing as explicit (high importance)');
-            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
-
-            // Optional: Notify user if configured
-            if (scoringConfig.notifyOnExplicit) {
-              console.log('[nuron] Would notify user: "Got it, noting that"');
-            }
-            return;
-        }
-      }
-
-      // Fallback: Store as before (no scoring)
-      const conversation = conversationSegments
-        .map(s => `${s.role}: ${s.content}`)
-        .join('\n\n');
-
-      console.log(`[nuron] Auto-capturing ${conversationSegments.length} messages`);
-
-      await adapter.store(
-        `[Session ${sessionId}]\n${conversation}`,
-        {
-          tier: 'silent',
-          score: 5,
-          source: 'auto_capture',
-          sessionId,
-        }
-      );
-
-      console.log('[nuron] Auto-capture: Conversation stored successfully');
     } catch (err) {
       console.error('[nuron] Auto-capture error:', err instanceof Error ? err.message : String(err));
       // Don't fail - continue normally
