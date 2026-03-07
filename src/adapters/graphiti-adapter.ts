@@ -480,7 +480,25 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
 
     console.log(`[GraphitiAdapter] Stored insight for ${sourceIds.length} source memories.`);
 
-    // 2. Mark source memories as consolidated
+    // 2. Create explicit relationship edges for each connection
+    // We iterate the connections and call the Graphiti edge-creation tool
+    for (const conn of connections) {
+      try {
+        await this.callTool('add_edge', {
+          group_id: this.config.groupId,
+          from_node_uuid: conn.fromId,
+          to_node_uuid: conn.toId,
+          label: conn.relationship,
+        });
+      } catch (err) {
+        console.error(`[GraphitiAdapter] Failed to create edge ${conn.fromId} -> ${conn.toId}:`, err);
+      }
+    }
+
+    // 3. Mark source memories as consolidated
+    // NOTE: This loop is O(n*m) and costly because Graphiti lacks batch updates.
+    // We are intentionally using a full fetch (list) + per-id update due to API limits.
+    // Revisit for batch/filtered fetch or partial update when Graphiti exposes those capabilities.
     if (sourceIds.length > 0) {
       // Need to fetch them to update them since Graphiti doesn't have partial update
       const allMemories = await this.list(200);

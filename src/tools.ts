@@ -234,7 +234,8 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }),
     async execute(toolCallId: string, params: { limit?: number }) {
       try {
-        const limit = params.limit ?? 10;
+        const rawLimit = params.limit ?? 10;
+        const limit = Math.min(Math.max(rawLimit, 1), 100); // Clamp limit to [1, 100]
         const memories = await adapter.getUnconsolidatedMemories(limit);
 
         if (!memories || memories.length === 0) {
@@ -287,6 +288,14 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
       connections: { fromId: string; toId: string; relationship: string }[];
     }) {
       try {
+        // Validation: Ensure sourceIds is a non-empty array
+        if (!params.sourceIds || !Array.isArray(params.sourceIds) || params.sourceIds.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'Error: sourceIds must be a non-empty array of memory identifiers.' }],
+            isError: true
+          };
+        }
+
         await adapter.storeConsolidation(
           params.sourceIds,
           params.summary,

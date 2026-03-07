@@ -12,6 +12,7 @@ import * as path from 'path';
  */
 
 const DAYS_UNTIL_PRUNE = 5;
+const DAYS_UNTIL_PRUNE_SILENT = 30; // Silent memories persist longer
 const REINFORCEMENTS_FOR_PROMOTION = 3; // Number of times accessed to promote to silent
 
 async function runSleepConsolidation() {
@@ -67,8 +68,10 @@ async function runSleepConsolidation() {
       const daysSinceActive = (now - lastActiveTime) / msInDay;
 
       // 1. Pruning Unused Memories (forgetting curve)
-      if (daysSinceActive >= DAYS_UNTIL_PRUNE) {
-        // Prune if untouched for 4-5 days
+      const pruneThreshold = mem.metadata.tier === 'silent' ? DAYS_UNTIL_PRUNE_SILENT : DAYS_UNTIL_PRUNE;
+      
+      if (daysSinceActive >= pruneThreshold) {
+        // Prune if untouched past threshold
         await adapter.forget(mem.id);
         pruned++;
         console.log(`[Sleep] 🗑️  Pruned forgotten memory (${mem.metadata.tier}): ${mem.id}`);
@@ -89,10 +92,14 @@ async function runSleepConsolidation() {
 
   } catch (err) {
     console.error('[Sleep] Error during consolidation cycle:', err);
+    throw err; // Ensure the caller sees the error
   } finally {
     await adapter.shutdown();
     console.log('[Sleep] Disconnected from backend.');
   }
 }
 
-runSleepConsolidation().catch(console.error);
+runSleepConsolidation().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
