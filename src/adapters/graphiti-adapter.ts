@@ -135,6 +135,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
       score: metadata.score || 5,
       source: metadata.source || 'auto_capture',
       createdAt: new Date().toISOString(),
+      consolidated: metadata.consolidated || false,
     };
 
     if (metadata.sessionId) memoryData.sessionId = metadata.sessionId;
@@ -164,6 +165,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
           sessionId: mem.sessionId as string | undefined,
           expiresAt: mem.expiresAt ? new Date(mem.expiresAt as string) : undefined,
           tags: mem.tags as string[] | undefined,
+          consolidated: mem.consolidated as boolean | undefined,
         };
       }
       // Fallback: check for tier prefix in raw content
@@ -445,6 +447,54 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     }
 
     return { deleted, upgraded };
+  }
+
+  /**
+   * Get unconsolidated memories for the Axon synthesis agent
+   */
+  async getUnconsolidatedMemories(limit = 10): Promise<MemoryResult[]> {
+    // Fetch a large batch to filter client-side since Graphiti list doesn't currently filter by consolidated
+    const allMemories = await this.list(Math.max(100, limit * 5));
+    return allMemories.filter(m => !m.metadata.consolidated).slice(0, limit);
+  }
+
+  /**
+   * Store the result of an Axon memory consolidation cycle.
+   */
+  async storeConsolidation(
+    sourceIds: string[],
+    summary: string,
+    insight: string,
+    connections: { fromId: string; toId: string; relationship: string }[]
+  ): Promise<void> {
+    // 1. Store the insight block as an explicit episode so Graphiti's LLM builds the temporal nodes
+    const insightContent = `SYNTHESIZED INSIGHT: ${insight}\nSUMMARY: ${summary}\nCONNECTIONS IDENTIFIED:\n${connections.map(c => `- ${c.fromId} ${c.relationship} ${c.toId}`).join('\n')}`;
+    
+    await this.store(insightContent, {
+      tier: 'explicit',
+      source: 'agent_auto',
+      tags: ['insight', 'synthesis'],
+      consolidated: true, // Insights are pre-consolidated
+      score: 10,
+    });
+
+    console.log(`[GraphitiAdapter] Stored insight for ${sourceIds.length} source memories.`);
+
+    // 2. Mark source memories as consolidated
+    if (sourceIds.length > 0) {
+      // Need to fetch them to update them since Graphiti doesn't have partial update
+      const allMemories = await this.list(200);
+      for (const id of sourceIds) {
+        const mem = allMemories.find(m => m.id === id);
+        if (mem) {
+          await this.update(id, mem.content, {
+            ...mem.metadata,
+            consolidated: true
+          });
+        }
+      }
+      console.log(`[GraphitiAdapter] Marked ${sourceIds.length} source memories as consolidated.`);
+    }
   }
 
   /**

@@ -212,6 +212,27 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       console.error('[nuron] Reinforcement processing failed:', err instanceof Error ? err.message : String(err));
     }
 
+    // Trigger Axon Memory Consolidation Agent
+    try {
+      console.log('[nuron] Dispatching synthesis trigger to Axon Agent...');
+      
+      // We emit a custom event or use the host API to invoke the background agent
+      if (typeof api.invokeAgent === 'function') {
+        await api.invokeAgent('axon', {
+          trigger: 'cron_consolidation',
+          hidden: true
+        });
+      } else if (typeof api.emit === 'function') {
+        api.emit('invoke_agent', {
+          agentId: 'axon',
+          reason: 'memory_synthesis_cycle',
+          hidden: true
+        });
+      }
+    } catch (err) {
+      console.error('[nuron] Axon Agent trigger failed:', err instanceof Error ? err.message : String(err));
+    }
+
     lastMaintenanceAt = now;
   });
 

@@ -81,6 +81,11 @@ export class Neo4jAdapter implements MemoryAdapter {
         CREATE INDEX memory_created IF NOT EXISTS FOR (m:Memory) ON (m.createdAt)
       `);
 
+      // Create consolidation index
+      await session.run(`
+        CREATE INDEX memory_consolidated IF NOT EXISTS FOR (m:Memory) ON (m.consolidated)
+      `);
+
       // Create embedding index if using vector search
       if (this.config.embedding) {
         await session.run(`
@@ -144,7 +149,8 @@ export class Neo4jAdapter implements MemoryAdapter {
           createdAt: $createdAt,
           expiresAt: $expiresAt,
           lastReinforced: $lastReinforced,
-          reinforcementCount: $reinforcementCount
+          reinforcementCount: $reinforcementCount,
+          consolidated: $consolidated
         })
         RETURN m.id AS id
       `,
@@ -159,6 +165,7 @@ export class Neo4jAdapter implements MemoryAdapter {
           expiresAt: metadata.expiresAt?.toISOString() || null,
           lastReinforced: metadata.lastReinforced?.toISOString() || null,
           reinforcementCount: metadata.reinforcementCount || 0,
+          consolidated: metadata.consolidated || false,
         }
       );
 
@@ -188,7 +195,7 @@ export class Neo4jAdapter implements MemoryAdapter {
         RETURN m.id AS id, m.content AS content, m.tier AS tier,
                m.score AS score, m.source AS source, m.createdAt AS createdAt,
                m.expiresAt AS expiresAt, m.reinforcementCount AS reinforcementCount,
-               m.lastReinforced AS lastReinforced, m.tags AS tags
+               m.lastReinforced AS lastReinforced, m.tags AS tags, m.consolidated AS consolidated
         ORDER BY m.score DESC, m.createdAt DESC
         LIMIT $limit
       `;
@@ -201,7 +208,7 @@ export class Neo4jAdapter implements MemoryAdapter {
         RETURN m.id AS id, m.content AS content, m.tier AS tier,
                m.score AS score, m.source AS source, m.createdAt AS createdAt,
                m.expiresAt AS expiresAt, m.reinforcementCount AS reinforcementCount,
-               m.lastReinforced AS lastReinforced, m.tags AS tags
+               m.lastReinforced AS lastReinforced, m.tags AS tags, m.consolidated AS consolidated
         ORDER BY m.score DESC, m.createdAt DESC
         LIMIT $limit
       `;
@@ -249,6 +256,7 @@ export class Neo4jAdapter implements MemoryAdapter {
           : undefined,
         reinforcementCount: record.get('reinforcementCount') || 0,
         tags: record.get('tags') || [],
+        consolidated: record.get('consolidated') || false,
       },
     }));
   }
@@ -293,6 +301,10 @@ export class Neo4jAdapter implements MemoryAdapter {
       updates.push('expiresAt: $expiresAt');
       params.expiresAt = metadata.expiresAt.toISOString();
     }
+    if (metadata?.consolidated !== undefined) {
+      updates.push('consolidated: $consolidated');
+      params.consolidated = metadata.consolidated;
+    }
 
     try {
       await session.run(
@@ -324,7 +336,7 @@ export class Neo4jAdapter implements MemoryAdapter {
         RETURN m.id AS id, m.content AS content, m.tier AS tier,
                m.score AS score, m.source AS source, m.createdAt AS createdAt,
                m.expiresAt AS expiresAt, m.reinforcementCount AS reinforcementCount,
-               m.lastReinforced AS lastReinforced, m.tags AS tags
+               m.lastReinforced AS lastReinforced, m.tags AS tags, m.consolidated AS consolidated
         ORDER BY m.createdAt DESC
         LIMIT $limit
       `;
@@ -335,7 +347,7 @@ export class Neo4jAdapter implements MemoryAdapter {
         RETURN m.id AS id, m.content AS content, m.tier AS tier,
                m.score AS score, m.source AS source, m.createdAt AS createdAt,
                m.expiresAt AS expiresAt, m.reinforcementCount AS reinforcementCount,
-               m.lastReinforced AS lastReinforced, m.tags AS tags
+               m.lastReinforced AS lastReinforced, m.tags AS tags, m.consolidated AS consolidated
         ORDER BY m.createdAt DESC
         LIMIT $limit
       `;
@@ -369,7 +381,7 @@ export class Neo4jAdapter implements MemoryAdapter {
       RETURN m.id AS id, m.content AS content, m.tier AS tier,
              m.score AS score, m.source AS source, m.createdAt AS createdAt,
              m.expiresAt AS expiresAt, m.reinforcementCount AS reinforcementCount,
-             m.lastReinforced AS lastReinforced, m.tags AS tags
+             m.lastReinforced AS lastReinforced, m.tags AS tags, m.consolidated AS consolidated
       ORDER BY m.createdAt DESC
       LIMIT $limit
     `;
@@ -404,7 +416,7 @@ export class Neo4jAdapter implements MemoryAdapter {
       RETURN m2.id AS id, m2.content AS content, m2.tier AS tier,
              m2.score AS score, m2.source AS source, m2.createdAt AS createdAt,
              m2.expiresAt AS expiresAt, m2.reinforcementCount AS reinforcementCount,
-             m2.lastReinforced AS lastReinforced, m2.tags AS tags
+             m2.lastReinforced AS lastReinforced, m2.tags AS tags, m2.consolidated AS consolidated
       ORDER BY m2.score DESC
       LIMIT $limit
     `;
@@ -518,6 +530,109 @@ export class Neo4jAdapter implements MemoryAdapter {
       const upgraded = upgradeResult.records[0]?.get('upgraded') || 0;
 
       return { deleted, upgraded };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Get unconsolidated memories for the Axon synthesis agent
+   */
+  async getUnconsolidatedMemories(limit = 10): Promise<MemoryResult[]> {
+    const session = this.getSession();
+
+    const cypher = `
+      MATCH (m:Memory)
+      WHERE m.consolidated = false OR m.consolidated IS NULL
+      RETURN m.id AS id, m.content AS content, m.tier AS tier,
+             m.score AS score, m.source AS source, m.createdAt AS createdAt,
+             m.expiresAt AS expiresAt, m.reinforcementCount AS reinforcementCount,
+             m.lastReinforced AS lastReinforced, m.tags AS tags, m.consolidated AS consolidated
+      ORDER BY m.createdAt DESC
+      LIMIT $limit
+    `;
+
+    try {
+      const result = await session.run(cypher, { limit });
+      return this.mapResults(result);
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Store the result of an Axon memory consolidation cycle.
+   */
+  async storeConsolidation(
+    sourceIds: string[],
+    summary: string,
+    insight: string,
+    connections: { fromId: string; toId: string; relationship: string }[]
+  ): Promise<void> {
+    const session = this.getSession();
+    const now = new Date().toISOString();
+    const consolidationId = `consolidation-${Date.now()}`;
+
+    try {
+      // Begin transaction
+      const tx = session.beginTransaction();
+
+      try {
+        // 1. Create the Insight/Consolidation node
+        await tx.run(
+          `
+          CREATE (c:Insight {
+            id: $consolidationId,
+            summary: $summary,
+            insight: $insight,
+            createdAt: $now
+          })
+          `,
+          { consolidationId, summary, insight, now }
+        );
+
+        // 2. Mark source memories as consolidated AND link them to the insight
+        if (sourceIds.length > 0) {
+          await tx.run(
+            `
+            MATCH (m:Memory) WHERE m.id IN $sourceIds
+            MATCH (c:Insight {id: $consolidationId})
+            SET m.consolidated = true
+            MERGE (m)-[:SYNTHESIZED_INTO]->(c)
+            `,
+            { sourceIds, consolidationId }
+          );
+        }
+
+        // 3. Create explicit graph relationships between memories
+        for (const conn of connections) {
+          if (!conn.fromId || !conn.toId || !conn.relationship) continue;
+          
+          // Sanitize relationship name for Neo4j (uppercase, underscores)
+          const relType = conn.relationship
+            .toUpperCase()
+            .replace(/ /g, '_')
+            .replace(/[^A-Z_]/g, '');
+            
+          if (!relType) continue;
+
+          await tx.run(
+            `
+            MATCH (from:Memory {id: $fromId})
+            MATCH (to:Memory {id: $toId})
+            MERGE (from)-[r:${relType}]->(to)
+            SET r.createdAt = $now
+            `,
+            { fromId: conn.fromId, toId: conn.toId, now }
+          );
+        }
+
+        await tx.commit();
+        console.log(`[Neo4jAdapter] Successfully stored consolidation ${consolidationId}`);
+      } catch (err) {
+        await tx.rollback();
+        throw err;
+      }
     } finally {
       await session.close();
     }

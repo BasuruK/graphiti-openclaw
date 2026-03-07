@@ -31,6 +31,8 @@ export interface MemoryMetadata {
   reinforcementCount: number;
   /** Previous score if downgraded */
   downgradedFrom?: number;
+  /** Has this memory been consolidated by Axon? */
+  consolidated?: boolean;
 }
 
 /**
@@ -246,6 +248,27 @@ export interface MemoryAdapter {
    * @returns Number of memories cleaned up
    */
   cleanup(): Promise<{ deleted: number; upgraded: number }>;
+
+  /**
+   * Get unconsolidated memories for the Axon synthesis agent
+   * @param limit - Max number to fetch
+   */
+  getUnconsolidatedMemories(limit?: number): Promise<MemoryResult[]>;
+
+  /**
+   * Store the result of an Axon memory consolidation cycle.
+   * Creates connection edges and marks sources as consolidated.
+   * @param sourceIds IDs of the memories that were synthesized.
+   * @param summary The synthesized summary text.
+   * @param insight The key "aha!" insight.
+   * @param connections The connections derived by the LLM.
+   */
+  storeConsolidation(
+    sourceIds: string[],
+    summary: string,
+    insight: string,
+    connections: { fromId: string; toId: string; relationship: string }[]
+  ): Promise<void>;
 
   /**
    * Get backend type identifier
