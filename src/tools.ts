@@ -7,7 +7,8 @@
  * - memory_list: Browse memories with filters
  * - memory_forget: Delete a memory
  * - memory_status: Check system health
- * - memory_consolidate: Synthesize recent memories
+ * - read_unconsolidated_memories: Fetch raw memories for Axon synthesis
+ * - memory_consolidate_batch: Store Axon synthesis findings
  * - memory_analyze: Score/assess a memory's importance
  */
 
@@ -223,78 +224,101 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }
   }, { name: 'memory_status' });
 
-  // Memory Consolidate - Synthesize recent memories
+  // Read Unconsolidated Memories - For Axon Agent
   api.registerTool({
-    name: 'memory_consolidate',
-    label: 'Memory Consolidate',
-    description: 'Synthesize and integrate recent memories. This helps maintain a coherent knowledge graph by connecting related memories.',
+    name: 'read_unconsolidated_memories',
+    label: 'Read Unconsolidated Memories',
+    description: 'Fetch a batch of raw, unconsolidated memories that need to be synthesized by the Axon agent.',
     parameters: Type.Object({
-      hours: Type.Optional(Type.Number({ default: 24, description: 'Look back hours for consolidation' }))
+      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum memories to fetch' }))
     }),
-    async execute(toolCallId: string, params: { hours?: number }) {
+    async execute(toolCallId: string, params: { limit?: number }) {
       try {
-        const hours = params.hours || 24;
-        const startTime = new Date(Date.now() - hours * 3600000);
+        const rawLimit = params.limit ?? 10;
+        const limit = Math.min(Math.max(rawLimit, 1), 100); // Clamp limit to [1, 100]
+        const memories = await adapter.getUnconsolidatedMemories(limit);
 
-        // Get recent memories and filter to only include those within the time range
-        const allRecentMemories = await adapter.list(50, 'all');
-        const recentMemories = allRecentMemories.filter(
-          m => m.metadata.createdAt >= startTime
-        );
-
-        if (recentMemories.length === 0) {
+        if (!memories || memories.length === 0) {
           return {
-            content: [{ type: 'text', text: 'No memories to consolidate.' }],
-            details: { consolidated: 0 }
+            content: [{ type: 'text', text: 'No unconsolidated memories found.' }],
+            details: { count: 0 }
           };
         }
 
-        // Group by semantic similarity (simplified - in production would use embeddings)
-        const clusters = new Map<string, typeof recentMemories>();
-
-        for (const memory of recentMemories) {
-          // Simple clustering by first few words
-          const key = memory.content.substring(0, 30).toLowerCase();
-          if (!clusters.has(key)) {
-            clusters.set(key, []);
-          }
-          clusters.get(key)!.push(memory);
-        }
-
-        let upgraded = 0;
-        let deleted = 0;
-
-        // Process clusters: upgrade if reinforced, delete duplicates
-        for (const [key, cluster] of clusters) {
-          if (cluster.length > 1) {
-            // Keep the most recent/relevant, mark others as consolidated
-            for (let i = 1; i < cluster.length; i++) {
-              try {
-                await adapter.forget(cluster[i].id);
-                deleted++;
-              } catch {
-                // May already be deleted
-              }
-            }
-          }
-        }
+        const formatted = memories.map((m, i) =>
+          `ID: ${m.id} | Date: ${m.metadata.createdAt.toISOString().split('T')[0]}\nContent: ${m.content}`
+        ).join('\n\n');
 
         return {
-          content: [{
-            type: 'text',
-            text: `Memory consolidation complete.\n\n- Memories analyzed: ${recentMemories.length}\n- Clusters found: ${clusters.size}\n- Duplicates removed: ${deleted}`
-          }],
-          details: { analyzed: recentMemories.length, clusters: clusters.size, deleted }
+          content: [{ type: 'text', text: `Unconsolidated Memories to Synthesize:\n\n${formatted}` }],
+          details: { count: memories.length, memories }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         return {
-          content: [{ type: 'text', text: `Error consolidating memories: ${errorMsg}` }],
+          content: [{ type: 'text', text: `Error reading unconsolidated memories: ${errorMsg}` }],
           isError: true
         };
       }
     }
-  }, { name: 'memory_consolidate' });
+  }, { name: 'read_unconsolidated_memories' });
+
+  // Memory Consolidate Batch - For Axon Agent to commit synthesis
+  api.registerTool({
+    name: 'memory_consolidate_batch',
+    label: 'Memory Consolidate Batch',
+    description: 'Store the results of a memory synthesis cycle. Marks source memories as consolidated, creates an insight, and writes semantic graph connections.',
+    parameters: Type.Object({
+      sourceIds: Type.Array(Type.String(), { description: 'IDs of the memories that were synthesized' }),
+      summary: Type.String({ description: 'A synthesized summary combining the key facts' }),
+      insight: Type.String({ description: 'ONE key overarching insight or hidden pattern found' }),
+      connections: Type.Array(
+        Type.Object({
+          fromId: Type.String(),
+          toId: Type.String(),
+          relationship: Type.String({ description: 'Capitalized verb (e.g., RELATES_TO, CONTRADICTS)' })
+        }),
+        { description: 'Semantic connections between the memories' }
+      )
+    }),
+    async execute(toolCallId: string, params: {
+      sourceIds: string[];
+      summary: string;
+      insight: string;
+      connections: { fromId: string; toId: string; relationship: string }[];
+    }) {
+      try {
+        // Validation: Ensure sourceIds is a non-empty array
+        if (!params.sourceIds || !Array.isArray(params.sourceIds) || params.sourceIds.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'Error: sourceIds must be a non-empty array of memory identifiers.' }],
+            isError: true
+          };
+        }
+
+        await adapter.storeConsolidation(
+          params.sourceIds,
+          params.summary,
+          params.insight,
+          params.connections
+        );
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Consolidation successful.\nProcessed ${params.sourceIds.length} memories.\nCreated ${params.connections.length} semantic connections.`
+          }],
+          details: { processed: params.sourceIds.length, connections: params.connections.length }
+        };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error executing consolidation batch: ${errorMsg}` }],
+          isError: true
+        };
+      }
+    }
+  }, { name: 'memory_consolidate_batch' });
 
   // Memory Analyze - Score/assess a memory's importance
   api.registerTool({
@@ -346,5 +370,5 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }
   }, { name: 'memory_analyze' });
 
-  console.log('[nuron] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, memory_consolidate, memory_analyze');
+  console.log('[nuron] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, read_unconsolidated_memories, memory_consolidate_batch, memory_analyze');
 }

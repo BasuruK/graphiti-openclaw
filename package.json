@@ -21,7 +21,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src/",
-    "prepublishOnly": "npm run build"
+    "sleep-cycle": "tsx scripts/sleep-consolidation.ts",
+    "prepublishOnly": "npm run build",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -35,7 +37,9 @@
     "vitest": "^2.0.0"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "keywords": [
     "openclaw",
