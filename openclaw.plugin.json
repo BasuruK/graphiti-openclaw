@@ -11,9 +11,9 @@
     "properties": {
       "backend": {
         "type": "string",
-        "enum": ["auto", "graphiti-mcp", "neo4j"],
-        "default": "auto",
-        "description": "Memory backend to use: auto-detect, graphiti-mcp, or neo4j"
+        "enum": ["graphiti-mcp", "auto"],
+        "default": "graphiti-mcp",
+        "description": "Memory backend to use: graphiti-mcp, or auto-detect Graphiti only"
       },
       "endpoint": {
         "type": "string",
@@ -39,7 +39,7 @@
           "password": { "type": "string", "description": "Neo4j password" },
           "database": { "type": "string", "description": "Neo4j database name" }
         },
-        "description": "Neo4j connection settings (for neo4j backend)"
+        "description": "Deprecated and ignored. Nuron MVP connects through Graphiti rather than directly to Neo4j."
       },
       "autoCapture": {
         "type": "boolean",

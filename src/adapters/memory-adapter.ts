@@ -2,7 +2,7 @@
  * Memory Adapter Interface
  *
  * Backend-agnostic interface for memory operations.
- * Supports multiple backends: Graphiti MCP, Neo4j Direct, FalkorDB, SQLite, etc.
+ * The current MVP ships against Graphiti MCP while preserving room for future backends.
  */
 
 import type { Readable } from 'stream';
@@ -120,25 +120,6 @@ export interface GraphitiMCPConfig {
   groupId: string;
 }
 
-export interface Neo4jConfig {
-  type: 'neo4j';
-  /** Bolt connection URI */
-  uri: string;
-  /** Database name */
-  database?: string;
-  /** Username */
-  user: string;
-  /** Password */
-  password: string;
-  /** Use embedding service for semantic search */
-  embedding?: {
-    provider: 'openai' | 'anthropic' | 'local';
-    model?: string;
-    endpoint?: string;
-    apiKey?: string;
-  };
-}
-
 export interface FalkorDBConfig {
   type: 'falkordb';
   /** Connection URL */
@@ -164,7 +145,7 @@ export interface SQLiteConfig {
   };
 }
 
-export type BackendConfig = GraphitiMCPConfig | Neo4jConfig | FalkorDBConfig | SQLiteConfig;
+export type BackendConfig = GraphitiMCPConfig | FalkorDBConfig | SQLiteConfig;
 
 /**
  * Core memory adapter interface

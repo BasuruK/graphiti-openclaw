@@ -7,7 +7,7 @@
  * - Auto-capture after each conversation
  * - Adaptive importance scoring (Memory Cortex)
  *
- * Uses pluggable backends: Graphiti MCP server, Neo4j direct, etc.
+ * Uses a Graphiti MCP backend for the current MVP while preserving an adapter boundary.
  *
  * ## Upgrade Notes
  * - v2.0.0: Plugin renamed from 'graphiti-memory' to 'nuron'.
@@ -121,9 +121,9 @@ export default {
       // Backend configuration
       backend: {
         type: 'string',
-        enum: ['graphiti-mcp', 'neo4j', 'auto'],
-        default: 'auto',
-        description: 'Memory backend to use: graphiti-mcp, neo4j, or auto-detect'
+        enum: ['graphiti-mcp', 'auto'],
+        default: 'graphiti-mcp',
+        description: 'Memory backend to use: graphiti-mcp, or auto-detect Graphiti only'
       },
 
       // Connection - Graphiti MCP
@@ -144,7 +144,7 @@ export default {
         description: 'Memory group ID for all conversations'
       },
 
-      // Connection - Neo4j (for neo4j backend)
+      // Deprecated legacy block kept only so older saved configs still parse cleanly.
       neo4j: {
         type: 'object',
         properties: {
@@ -153,7 +153,7 @@ export default {
           password: { type: 'string' },
           database: { type: 'string' }
         },
-        description: 'Neo4j connection settings'
+        description: 'Deprecated and ignored. Nuron MVP connects through Graphiti rather than directly to Neo4j.'
       },
 
       // Auto-capture
@@ -333,10 +333,10 @@ export default {
 
     try {
       // Determine backend type
-      const backendType = config.backend || 'auto';
+      const backendType = config.backend || 'graphiti-mcp';
 
       if (backendType === 'auto') {
-        console.log('[nuron] Auto-detecting memory backend...');
+        console.log('[nuron] Auto-detecting Graphiti memory backend...');
         // Map plugin config to BackendConfig shape for auto-detection
         const backendConfig: Partial<BackendConfig> = {};
         if (config.endpoint) (backendConfig as any).endpoint = config.endpoint;
@@ -352,15 +352,10 @@ export default {
           groupId: config.groupId || 'default'
         });
       } else if (backendType === 'neo4j') {
-        console.log('[nuron] Using Neo4j backend...');
-        const neo4jConfig = config.neo4j || {};
-        adapter = adapterFactory.create({
-          type: 'neo4j',
-          uri: neo4jConfig.uri || 'bolt://localhost:7687',
-          user: neo4jConfig.user || 'neo4j',
-          password: neo4jConfig.password || 'neo4j',
-          database: neo4jConfig.database
-        });
+        throw new Error(
+          'The direct Neo4j backend has been removed from Nuron MVP. ' +
+          'Run Graphiti against Neo4j and configure backend="graphiti-mcp" instead.'
+        );
       } else {
         throw new Error(`Unknown backend type: ${backendType}`);
       }
