@@ -174,8 +174,8 @@ export class MemoryScorer {
         return {
           score: 2,
           tier: 'ephemeral',
-          reasoning: 'Conversation too short/trivial – skipping detailed scoring',
-          recommendedAction: 'store_ephemeral'
+          reasoning: 'Conversation too short/trivial – skipping storage',
+          recommendedAction: 'skip'
         };
       }
     }

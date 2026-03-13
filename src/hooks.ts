@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult, ScoringModelConfig } from './memory-scorer.js';
+import { createMemoryScorer, DEFAULT_SCORING_CONFIG, type ScoringConfig, type ScoringResult, type ScoringModelConfig } from './memory-scorer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -180,14 +180,20 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       }
 
       const sessionId = event.sessionId || 'unknown';
+      const scoreResult = await scorer.scoreConversation(conversationSegments);
 
-      // ============================================================
-      // NOTE: Adaptive scoring is now handled natively by the OpenClaw
-      // LLM agent via the MEMORY.md system prompt instructions.
-      // The agent will silently invoke the memory_store tool directly.
-      // Therefore, we no longer need to auto-capture aggressively here.
-      // ============================================================
-      console.log('[nuron] Auto-capture disabled: delegating to native OpenClaw LLM classification via MCP tools.');
+      console.log(`[nuron] Auto-capture scored conversation ${scoreResult.score}/10 (${scoreResult.tier})`);
+
+      if (scoreResult.recommendedAction === 'skip') {
+        console.log('[nuron] Auto-capture skipped low-importance conversation');
+        return;
+      }
+
+      await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
+
+      if (scoreResult.tier === 'explicit' && scoringConfig.notifyOnExplicit) {
+        console.log('[nuron] Auto-capture stored an explicit memory');
+      }
 
     } catch (err) {
       console.error('[nuron] Auto-capture error:', err instanceof Error ? err.message : String(err));
@@ -243,6 +249,29 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
   });
 
   console.log('[nuron] Hooks registered with adaptive scoring');
+}
+
+async function storeWithMetadata(
+  adapter: MemoryAdapter,
+  segments: { content: string; role: 'user' | 'assistant' }[],
+  sessionId: string,
+  scoreResult: ScoringResult
+): Promise<void> {
+  const conversation = segments
+    .map((segment) => `${segment.role}: ${segment.content}`)
+    .join('\n\n');
+
+  const expiresAt = scoreResult.expiresInHours
+    ? new Date(Date.now() + scoreResult.expiresInHours * 3600000)
+    : undefined;
+
+  await adapter.store(conversation, {
+    tier: scoreResult.tier,
+    score: scoreResult.score,
+    source: 'auto_capture',
+    sessionId,
+    expiresAt,
+  });
 }
 
 /**
