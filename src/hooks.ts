@@ -21,6 +21,30 @@ const MAX_CAPTURE_MESSAGES = 15;
 
 /** Module-level timestamp for throttling heartbeat maintenance */
 let lastMaintenanceAt = 0;
+const MEMORY_MD_PATH = path.resolve(__dirname, '../MEMORY.md');
+
+let memoryInstructionsCache: { mtimeMs: number; value: string } | null = null;
+
+function getCachedMemoryInstructions(): string {
+  try {
+    if (!fs.existsSync(MEMORY_MD_PATH)) {
+      memoryInstructionsCache = null;
+      return '';
+    }
+
+    const { mtimeMs } = fs.statSync(MEMORY_MD_PATH);
+    if (memoryInstructionsCache && memoryInstructionsCache.mtimeMs === mtimeMs) {
+      return memoryInstructionsCache.value;
+    }
+
+    const value = fs.readFileSync(MEMORY_MD_PATH, 'utf-8');
+    memoryInstructionsCache = { mtimeMs, value };
+    return value;
+  } catch (err) {
+    console.error('[nuron] Could not load MEMORY.md instructions:', err);
+    return memoryInstructionsCache?.value ?? '';
+  }
+}
 
 /**
  * Register memory hooks with the OpenClaw API
@@ -91,15 +115,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
       console.log(`[nuron] Auto-recall: Found ${results ? results.length : 0} relevant memories`);
 
-      let memoryInstructions = '';
-      try {
-        const memoryMdPath = path.resolve(__dirname, '../MEMORY.md');
-        if (fs.existsSync(memoryMdPath)) {
-          memoryInstructions = fs.readFileSync(memoryMdPath, 'utf-8');
-        }
-      } catch (err) {
-        console.error('[nuron] Could not load MEMORY.md instructions:', err);
-      }
+      const memoryInstructions = getCachedMemoryInstructions();
 
       // Inject context via prependContext (always include instructions)
       return {
@@ -215,12 +231,10 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
     // Trigger Axon Memory Consolidation Agent
     try {
-      console.log('[nuron] Dispatching synthesis trigger to Axon Agent...');
-
-      // Dispatch Axon Trigger using a documented method/helper
-      // This uses documented 'on' hooks or 'registerTool' patterns if available
-      // For now, we use the verified dispatch mechanism
-      await dispatchAxonTrigger(api);
+      const dispatched = await dispatchAxonTrigger(api, config);
+      if (dispatched) {
+        console.log('[nuron] Dispatched synthesis trigger to Axon agent.');
+      }
     } catch (err) {
       console.error('[nuron] Axon Agent trigger failed:', err instanceof Error ? err.message : String(err));
     }
@@ -232,15 +246,30 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 }
 
 /**
- * Helper to dispatch the Axon consolidation trigger via supported OpenClaw methods.
+ * Helper to dispatch the Axon consolidation trigger via an explicitly provided host hook.
  */
-async function dispatchAxonTrigger(api: any): Promise<void> {
-  // Use verified plugin APIs - e.g. emitting a documented event that the axon agent listens to
-  // or calling a documented tool if the host supports direct tool invocation.
-  if (typeof api.emit === 'function') {
-    api.emit('nuron:trigger_axon', {
-      trigger: 'cron_consolidation',
-      timestamp: Date.now()
-    });
+async function dispatchAxonTrigger(api: any, config: any): Promise<boolean> {
+  if (config.axonDispatchEnabled !== true) {
+    return false;
   }
+
+  const payload = {
+    trigger: 'cron_consolidation' as const,
+    timestamp: Date.now()
+  };
+
+  const dispatchHook =
+    typeof api?.dispatchAxonTrigger === 'function'
+      ? api.dispatchAxonTrigger
+      : typeof api?.nuron?.dispatchAxonTrigger === 'function'
+        ? api.nuron.dispatchAxonTrigger
+        : undefined;
+
+  if (!dispatchHook) {
+    console.warn('[nuron] Axon dispatch is enabled but no supported dispatch hook is available; skipping trigger.');
+    return false;
+  }
+
+  await Promise.resolve(dispatchHook(payload));
+  return true;
 }

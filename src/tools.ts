@@ -296,6 +296,11 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
           };
         }
 
+        const hasEmptyConnections = Array.isArray(params.connections) && params.connections.length === 0;
+        const warning = hasEmptyConnections
+          ? 'Warning: no semantic connections were provided, so the consolidation created an insight without graph edges.'
+          : undefined;
+
         await adapter.storeConsolidation(
           params.sourceIds,
           params.summary,
@@ -306,9 +311,13 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
         return {
           content: [{
             type: 'text',
-            text: `Consolidation successful.\nProcessed ${params.sourceIds.length} memories.\nCreated ${params.connections.length} semantic connections.`
+            text: `Consolidation successful.\nProcessed ${params.sourceIds.length} memories.\nCreated ${params.connections.length} semantic connections.${warning ? `\n${warning}` : ''}`
           }],
-          details: { processed: params.sourceIds.length, connections: params.connections.length }
+          details: {
+            processed: params.sourceIds.length,
+            connections: params.connections.length,
+            ...(warning ? { warning } : {})
+          }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);

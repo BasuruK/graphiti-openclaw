@@ -500,8 +500,27 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     // We are intentionally using a full fetch (list) + per-id update due to API limits.
     // Revisit for batch/filtered fetch or partial update when Graphiti exposes those capabilities.
     if (sourceIds.length > 0) {
-      // Need to fetch them to update them since Graphiti doesn't have partial update
-      const allMemories = await this.list(200);
+      // Need to fetch them to update them since Graphiti doesn't have partial update.
+      // Because list() only returns the most recent N items, grow the fetch window until
+      // every source id is found or Graphiti returns fewer rows than requested.
+      let limit = Math.max(200, sourceIds.length);
+      let allMemories: MemoryResult[] = [];
+      const missingIds = new Set(sourceIds);
+
+      while (missingIds.size > 0) {
+        allMemories = await this.list(limit);
+        for (const mem of allMemories) {
+          missingIds.delete(mem.id);
+        }
+
+        if (allMemories.length < limit) {
+          break;
+        }
+
+        limit *= 2;
+      }
+
+      let updatedCount = 0;
       for (const id of sourceIds) {
         const mem = allMemories.find(m => m.id === id);
         if (mem) {
@@ -509,9 +528,12 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
             ...mem.metadata,
             consolidated: true
           });
+          updatedCount += 1;
+        } else {
+          console.warn(`[GraphitiAdapter] Could not find source memory ${id} while marking memories as consolidated.`);
         }
       }
-      console.log(`[GraphitiAdapter] Marked ${sourceIds.length} source memories as consolidated.`);
+      console.log(`[GraphitiAdapter] Marked ${updatedCount} source memories as consolidated.`);
     }
   }
 

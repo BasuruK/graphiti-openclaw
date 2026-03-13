@@ -189,6 +189,16 @@ export default {
         default: true,
         description: 'Enable adaptive importance scoring'
       },
+      scoringLegacyEnabled: {
+        type: 'boolean',
+        default: false,
+        description: 'Opt in to the legacy scorer cleanup and reinforcement loops during heartbeat maintenance.'
+      },
+      scoringLegacyMode: {
+        type: 'boolean',
+        default: false,
+        description: 'Legacy alias for enabling the scorer maintenance loops during heartbeat maintenance.'
+      },
       scoringExplicitThreshold: {
         type: 'number',
         default: 8,
@@ -289,6 +299,11 @@ export default {
           }
         },
         description: 'Optional local model for importance scoring instead of heuristics. Uses llama.cpp server API (OpenAI-compatible /v1/chat/completions).'
+      },
+      axonDispatchEnabled: {
+        type: 'boolean',
+        default: false,
+        description: 'Opt in to heartbeat-based Axon dispatch when the host exposes a supported dispatchAxonTrigger hook.'
       }
     }
   },

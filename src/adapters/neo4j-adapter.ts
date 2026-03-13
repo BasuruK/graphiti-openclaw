@@ -18,6 +18,16 @@ import {
   type Neo4jConfig,
 } from './memory-adapter.js';
 
+const ALLOWED_RELATIONSHIPS = [
+  'RELATES_TO',
+  'CONTRADICTS',
+  'BUILDS_UPON',
+  'DEPENDS_ON',
+  'SIMILAR_TO',
+  'RESOLVES',
+  'SYNTHESIZED_INTO'
+] as const;
+
 /**
  * Neo4j Direct Adapter
  *
@@ -616,18 +626,7 @@ export class Neo4jAdapter implements MemoryAdapter {
             
           if (!relType) continue;
 
-          // Allowlist for relationship types (defense-in-depth)
-          const ALLOWED_RELATIONSHIPS = [
-            'RELATES_TO',
-            'CONTRADICTS',
-            'BUILDS_UPON',
-            'DEPENDS_ON',
-            'SIMILAR_TO',
-            'RESOLVES',
-            'SYNTHESIZED_INTO'
-          ];
-
-          if (!ALLOWED_RELATIONSHIPS.includes(relType)) {
+          if (!(ALLOWED_RELATIONSHIPS as readonly string[]).includes(relType)) {
             console.warn(`[Neo4jAdapter] Skipping unauthorized relationship type: ${relType}`);
             continue;
           }
