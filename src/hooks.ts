@@ -5,8 +5,14 @@
  * Now uses MemoryAdapter interface for backend-agnostic operation.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import { MemoryScorer, createMemoryScorer, DEFAULT_SCORING_CONFIG, ScoringConfig, ScoringResult, ScoringModelConfig } from './memory-scorer.js';
+import { createMemoryScorer, DEFAULT_SCORING_CONFIG, type ScoringConfig, type ScoringResult, type ScoringModelConfig } from './memory-scorer.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 /** Minimum message length to consider for capture */
 const MIN_MESSAGE_LENGTH = 20;
@@ -15,6 +21,30 @@ const MAX_CAPTURE_MESSAGES = 15;
 
 /** Module-level timestamp for throttling heartbeat maintenance */
 let lastMaintenanceAt = 0;
+const MEMORY_MD_PATH = path.resolve(__dirname, '../MEMORY.md');
+
+let memoryInstructionsCache: { mtimeMs: number; value: string } | null = null;
+
+function getCachedMemoryInstructions(): string {
+  try {
+    if (!fs.existsSync(MEMORY_MD_PATH)) {
+      memoryInstructionsCache = null;
+      return '';
+    }
+
+    const { mtimeMs } = fs.statSync(MEMORY_MD_PATH);
+    if (memoryInstructionsCache && memoryInstructionsCache.mtimeMs === mtimeMs) {
+      return memoryInstructionsCache.value;
+    }
+
+    const value = fs.readFileSync(MEMORY_MD_PATH, 'utf-8');
+    memoryInstructionsCache = { mtimeMs, value };
+    return value;
+  } catch (err) {
+    console.error('[nuron] Could not load MEMORY.md instructions:', err);
+    return memoryInstructionsCache?.value ?? '';
+  }
+}
 
 /**
  * Register memory hooks with the OpenClaw API
@@ -75,21 +105,21 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
         tier: 'all'
       });
 
-      if (!results || results.length === 0) {
-        console.log('[nuron] Auto-recall: No relevant memories found');
-        return;
-      }
+      // If no results, still return MEMORY.md instructions for the system prompt
+      const contextBlock = results && results.length > 0
+        ? results
+            .slice(0, config.recallMaxFacts || 5)
+            .map((r, i) => `• ${r.summary || r.content.substring(0, 100)}`)
+            .join('\n')
+        : 'No relevant memories found.';
 
-      const contextBlock = results
-        .slice(0, config.recallMaxFacts || 5)
-        .map((r, i) => `• ${r.summary || r.content.substring(0, 100)}`)
-        .join('\n');
+      console.log(`[nuron] Auto-recall: Found ${results ? results.length : 0} relevant memories`);
 
-      console.log(`[nuron] Auto-recall: Found ${results.length} relevant memories`);
+      const memoryInstructions = getCachedMemoryInstructions();
 
-      // Inject context via prependContext
+      // Inject context via prependContext (always include instructions)
       return {
-        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>`
+        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>\n\n<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`
       };
     } catch (err) {
       console.error('[nuron] Auto-recall error:', err instanceof Error ? err.message : String(err));
@@ -150,66 +180,21 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       }
 
       const sessionId = event.sessionId || 'unknown';
+      const scoreResult = await scorer.scoreConversation(conversationSegments);
 
-      // ============================================================
-      // ADAPTIVE SCORING: Analyze conversation and determine importance
-      // ============================================================
+      console.log(`[nuron] Auto-capture scored conversation ${scoreResult.score}/10 (${scoreResult.tier})`);
 
-      if (scoringConfig.enabled) {
-        console.log('[nuron] Scoring conversation for importance...');
-
-        const scoreResult = await scorer.scoreConversation(conversationSegments);
-
-        console.log(`[nuron] Score: ${scoreResult.score}/10 (${scoreResult.tier})`);
-        console.log(`[nuron] Reasoning: ${scoreResult.reasoning}`);
-        console.log(`[nuron] Action: ${scoreResult.recommendedAction}`);
-
-        // Handle based on recommended action
-        switch (scoreResult.recommendedAction) {
-          case 'skip':
-            console.log('[nuron] Skipping capture - low importance');
-            return;
-
-          case 'store_ephemeral':
-            console.log('[nuron] Storing as ephemeral (short-term)');
-            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
-            return;
-
-          case 'store_silent':
-            console.log('[nuron] Storing as silent (medium importance)');
-            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
-            return;
-
-          case 'store_explicit':
-            console.log('[nuron] Storing as explicit (high importance)');
-            await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
-
-            // Optional: Notify user if configured
-            if (scoringConfig.notifyOnExplicit) {
-              console.log('[nuron] Would notify user: "Got it, noting that"');
-            }
-            return;
-        }
+      if (scoreResult.recommendedAction === 'skip') {
+        console.log('[nuron] Auto-capture skipped low-importance conversation');
+        return;
       }
 
-      // Fallback: Store as before (no scoring)
-      const conversation = conversationSegments
-        .map(s => `${s.role}: ${s.content}`)
-        .join('\n\n');
+      await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
 
-      console.log(`[nuron] Auto-capturing ${conversationSegments.length} messages`);
+      if (scoreResult.tier === 'explicit' && scoringConfig.notifyOnExplicit) {
+        console.log('[nuron] Auto-capture stored an explicit memory');
+      }
 
-      await adapter.store(
-        `[Session ${sessionId}]\n${conversation}`,
-        {
-          tier: 'silent',
-          score: 5,
-          source: 'auto_capture',
-          sessionId,
-        }
-      );
-
-      console.log('[nuron] Auto-capture: Conversation stored successfully');
     } catch (err) {
       console.error('[nuron] Auto-capture error:', err instanceof Error ? err.message : String(err));
       // Don't fail - continue normally
@@ -227,24 +212,37 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
     console.log('[nuron] Running scheduled memory maintenance...');
 
-    // Cleanup expired ephemeral memories (isolated)
-    try {
-      const cleanup = await scorer.cleanupExpiredMemories();
-      if (cleanup.deleted > 0) {
-        console.log(`[nuron] Cleaned up ${cleanup.deleted} expired memories`);
+    // Legacy Scorers: Only run if explicitly enabled (opt-in)
+    if (config.scoringLegacyEnabled === true || config.scoringLegacyMode === true) {
+      // Cleanup expired ephemeral memories (isolated)
+      try {
+        const cleanup = await scorer.cleanupExpiredMemories();
+        if (cleanup.deleted > 0) {
+          console.log(`[nuron] Cleaned up ${cleanup.deleted} expired memories`);
+        }
+      } catch (err) {
+        console.error('[nuron] Cleanup failed:', err instanceof Error ? err.message : String(err));
       }
-    } catch (err) {
-      console.error('[nuron] Cleanup failed:', err instanceof Error ? err.message : String(err));
+
+      // Process reinforcements (isolated — runs even if cleanup failed)
+      try {
+        const reinforcements = await scorer.processReinforcements();
+        if (reinforcements.upgraded > 0 || reinforcements.downgraded > 0) {
+          console.log(`[nuron] Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded`);
+        }
+      } catch (err) {
+        console.error('[nuron] Reinforcement processing failed:', err instanceof Error ? err.message : String(err));
+      }
     }
 
-    // Process reinforcements (isolated — runs even if cleanup failed)
+    // Trigger Axon Memory Consolidation Agent
     try {
-      const reinforcements = await scorer.processReinforcements();
-      if (reinforcements.upgraded > 0 || reinforcements.downgraded > 0) {
-        console.log(`[nuron] Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded`);
+      const dispatched = await dispatchAxonTrigger(api, config);
+      if (dispatched) {
+        console.log('[nuron] Dispatched synthesis trigger to Axon agent.');
       }
     } catch (err) {
-      console.error('[nuron] Reinforcement processing failed:', err instanceof Error ? err.message : String(err));
+      console.error('[nuron] Axon Agent trigger failed:', err instanceof Error ? err.message : String(err));
     }
 
     lastMaintenanceAt = now;
@@ -253,16 +251,6 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
   console.log('[nuron] Hooks registered with adaptive scoring');
 }
 
-/**
- * Store conversation with importance scoring metadata
- *
- * Stores the conversation to the adapter with metadata.
- *
- * @param adapter - Memory adapter
- * @param segments - Conversation segments
- * @param sessionId - Current session ID
- * @param scoreResult - Importance scoring result
- */
 async function storeWithMetadata(
   adapter: MemoryAdapter,
   segments: { content: string; role: 'user' | 'assistant' }[],
@@ -270,28 +258,47 @@ async function storeWithMetadata(
   scoreResult: ScoringResult
 ): Promise<void> {
   const conversation = segments
-    .map(s => `${s.role}: ${s.content}`)
+    .map((segment) => `${segment.role}: ${segment.content}`)
     .join('\n\n');
 
-  // Build metadata
-  const metadata = {
+  const expiresAt = scoreResult.expiresInHours
+    ? new Date(Date.now() + scoreResult.expiresInHours * 3600000)
+    : undefined;
+
+  await adapter.store(conversation, {
     tier: scoreResult.tier,
     score: scoreResult.score,
-    source: 'auto_capture' as const,
+    source: 'auto_capture',
     sessionId,
-    expiresAt: scoreResult.expiresInHours
-      ? new Date(Date.now() + scoreResult.expiresInHours * 3600000)
-      : undefined,
+    expiresAt,
+  });
+}
+
+/**
+ * Helper to dispatch the Axon consolidation trigger via an explicitly provided host hook.
+ */
+async function dispatchAxonTrigger(api: any, config: any): Promise<boolean> {
+  if (config.axonDispatchEnabled !== true) {
+    return false;
+  }
+
+  const payload = {
+    trigger: 'cron_consolidation' as const,
+    timestamp: Date.now()
   };
 
-  // Store to adapter
-  await adapter.store(conversation, metadata);
+  const dispatchHook =
+    typeof api?.dispatchAxonTrigger === 'function'
+      ? api.dispatchAxonTrigger
+      : typeof api?.nuron?.dispatchAxonTrigger === 'function'
+        ? api.nuron.dispatchAxonTrigger
+        : undefined;
 
-  // Log the stored metadata
-  console.log(`[nuron] Stored with metadata:`, {
-    tier: scoreResult.tier,
-    score: scoreResult.score,
-    expiresInHours: scoreResult.expiresInHours,
-    reasoning: scoreResult.reasoning
-  });
+  if (!dispatchHook) {
+    console.warn('[nuron] Axon dispatch is enabled but no supported dispatch hook is available; skipping trigger.');
+    return false;
+  }
+
+  await Promise.resolve(dispatchHook(payload));
+  return true;
 }
