@@ -181,7 +181,6 @@
     }
   },
   "uiHints": {
-    "neo4j.password": { "label": "Neo4j Password", "sensitive": true },
     "scoringModel.apiKey": { "label": "Scoring Model API Key", "sensitive": true }
   }
 }

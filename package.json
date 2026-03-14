@@ -24,7 +24,7 @@
     "AXON.md"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc",
+    "build": "rimraf dist && tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -40,6 +40,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "eslint": "^9.0.0",
+    "rimraf": "^5.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.3.0",
     "vitest": "^2.0.0"

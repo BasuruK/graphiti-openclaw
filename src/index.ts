@@ -319,7 +319,7 @@ export default {
 
     // Safe logging - don't expose secrets
     const safeConfig = {
-      backend: config.backend || 'auto',
+      backend: config.backend || 'graphiti-mcp',
       endpoint: config.endpoint ? '[configured]' : 'http://localhost:8000/sse',
       groupId: config.groupId ?? 'default',
       autoCapture: config.autoCapture,
