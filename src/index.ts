@@ -351,11 +351,6 @@ export default {
           endpoint: config.endpoint || 'http://localhost:8000/sse',
           groupId: config.groupId || 'default'
         });
-      } else if (backendType === 'neo4j') {
-        throw new Error(
-          'The direct Neo4j backend has been removed from Nuron MVP. ' +
-          'Run Graphiti against Neo4j and configure backend="graphiti-mcp" instead.'
-        );
       } else {
         throw new Error(`Unknown backend type: ${backendType}`);
       }
