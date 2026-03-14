@@ -6,7 +6,7 @@ This is a research-driven project. The current package is intended to be a worka
 
 ## What Works
 
-- Graphiti MCP and Neo4j adapter support, with Graphiti as the intended primary path.
+- Graphiti MCP as the active storage path for the MVP.
 - Memory tools for recall, store, list, forget, status, analysis, and consolidation plumbing.
 - Auto-recall hook that injects relevant memories and the Nuron memory policy before agent turns.
 - Auto-capture hook that scores conversations and stores them through the plugin.
@@ -16,7 +16,7 @@ This is a research-driven project. The current package is intended to be a worka
 
 - Axon background consolidation depends on host support for an opt-in dispatch hook. The consolidation tools and persistence path are implemented, but fully autonomous background dispatch should be treated as host-dependent.
 - The project is research-inspired. Do not present it as a validated simulation of human memory.
-- Graphiti remains the first-class target. Other backends exist to preserve architectural flexibility, not because they are the primary shipped path.
+- Graphiti remains the first-class target. The adapter boundary stays in place so other backends can be revisited later without changing hook and tool logic.
 
 ## Installation
 

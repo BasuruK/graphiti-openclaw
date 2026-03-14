@@ -13,7 +13,6 @@ export type {
   MemoryStats,
   HealthResult,
   GraphitiMCPConfig,
-  Neo4jConfig,
   FalkorDBConfig,
   SQLiteConfig,
   BackendConfig,
@@ -23,7 +22,6 @@ export type {
 
 // Re-export adapters
 export { GraphitiMCPAdapter, createGraphitiMCPAdapter } from './graphiti-adapter.js';
-export { Neo4jAdapter, createNeo4jAdapter } from './neo4j-adapter.js';
 
 // Re-export factory
 export { AdapterFactory, adapterFactory, createAdapterFromConfig } from './factory.js';

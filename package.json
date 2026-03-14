@@ -15,8 +15,16 @@
       "types": "./dist/adapters/index.d.ts"
     }
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "openclaw.plugin.json",
+    "MEMORY.md",
+    "AXON.md"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "rimraf dist && tsc",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -27,12 +35,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@sinclair/typebox": "^0.32.0",
-    "neo4j-driver": "^5.22.0"
+    "@sinclair/typebox": "^0.32.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "eslint": "^9.0.0",
+    "rimraf": "^5.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.3.0",
     "vitest": "^2.0.0"
@@ -47,7 +55,6 @@
     "memory",
     "nuron",
     "knowledge-graph",
-    "neo4j",
     "ai-agent",
     "temporal-memory",
     "agentic",
