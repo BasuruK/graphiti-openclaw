@@ -121,9 +121,9 @@ export default {
       // Backend configuration
       backend: {
         type: 'string',
-        enum: ['graphiti-mcp', 'auto'],
+        enum: ['graphiti-mcp', 'auto', 'neo4j'],
         default: 'graphiti-mcp',
-        description: 'Memory backend to use: graphiti-mcp, or auto-detect Graphiti only'
+        description: 'Memory backend to use: graphiti-mcp, or auto-detect Graphiti only. neo4j is deprecated and ignored.'
       },
 
       // Connection - Graphiti MCP
