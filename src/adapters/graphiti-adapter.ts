@@ -7,6 +7,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 
 import {
@@ -18,6 +19,90 @@ import {
   type HealthResult,
   type GraphitiMCPConfig,
 } from './memory-adapter.js';
+import { getLogger } from '../logger.js';
+
+const logger = getLogger('graphiti');
+
+const DEFAULT_HTTP_ENDPOINT = 'http://localhost:8000/mcp/';
+const DEFAULT_SSE_ENDPOINT = 'http://localhost:8000/sse';
+
+function normalizeEndpointForTransport(
+  endpoint: string | undefined,
+  transport: GraphitiMCPConfig['transport']
+): string | undefined {
+  if (transport === 'stdio') {
+    return endpoint;
+  }
+
+  const fallback = transport === 'http' ? DEFAULT_HTTP_ENDPOINT : DEFAULT_SSE_ENDPOINT;
+  const rawEndpoint = endpoint || fallback;
+
+  try {
+    const url = new URL(rawEndpoint);
+
+    if (transport === 'http') {
+      if (url.pathname === '/' || url.pathname === '' || url.pathname === '/sse' || url.pathname === '/sse/') {
+        url.pathname = '/mcp/';
+      } else if (url.pathname === '/mcp') {
+        url.pathname = '/mcp/';
+      }
+      return url.toString();
+    }
+
+    if (url.pathname === '/' || url.pathname === '') {
+      url.pathname = '/sse';
+    }
+
+    return url.toString();
+  } catch {
+    return rawEndpoint;
+  }
+}
+
+function formatConnectionError(config: GraphitiMCPConfig, err: unknown): Error {
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (config.transport === 'sse' && message.includes('404')) {
+    return new Error(
+      `${message}. Graphiti HTTP transport uses /mcp/ rather than /sse. ` +
+      `If your server is configured with server.transport=http, set Nuron transport to "http" ` +
+      `and endpoint to "${DEFAULT_HTTP_ENDPOINT}".`
+    );
+  }
+
+  if (config.transport === 'http' && (message.includes('404') || message.includes('406'))) {
+    return new Error(
+      `${message}. Verify Nuron is pointed at Graphiti's streamable HTTP endpoint, typically "${DEFAULT_HTTP_ENDPOINT}".`
+    );
+  }
+
+  return err instanceof Error ? err : new Error(message);
+}
+
+export function normalizeGraphitiMCPConfig(config: GraphitiMCPConfig): GraphitiMCPConfig {
+  return {
+    ...config,
+    endpoint: normalizeEndpointForTransport(config.endpoint, config.transport),
+  };
+}
+
+type GraphitiNodeResult = {
+  uuid?: string;
+  name?: string;
+  summary?: string;
+  fact?: string;
+  valid_at?: string;
+  created_at?: string;
+  content?: string;
+};
+
+type GraphitiEnvelope = {
+  error?: string;
+  message?: string;
+  nodes?: GraphitiNodeResult[];
+  facts?: GraphitiNodeResult[];
+  episodes?: GraphitiNodeResult[];
+};
 
 /**
  * Graphiti MCP Adapter
@@ -30,7 +115,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
   private connected = false;
 
   constructor(config: GraphitiMCPConfig) {
-    this.config = config;
+    this.config = normalizeGraphitiMCPConfig(config);
     // @ts-ignore - MCP SDK type changes
     this.client = new Client(
       { name: 'nuron', version: '1.0.0' },
@@ -51,15 +136,22 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
         command: this.config.command || 'uv',
         args: this.config.args || ['run', 'graphiti-mcp', '--transport', 'stdio'],
       });
+    } else if (this.config.transport === 'http') {
+      const endpoint = this.config.endpoint || DEFAULT_HTTP_ENDPOINT;
+      transport = new StreamableHTTPClientTransport(new URL(endpoint));
     } else {
       // SSE transport
-      const endpoint = this.config.endpoint || 'http://localhost:8000/sse';
+      const endpoint = this.config.endpoint || DEFAULT_SSE_ENDPOINT;
       transport = new SSEClientTransport(new URL(endpoint));
     }
 
-    await this.client.connect(transport);
-    this.connected = true;
-    console.log('[GraphitiMCPAdapter] Connected to Graphiti MCP server');
+    try {
+      await this.client.connect(transport);
+      this.connected = true;
+      logger.info(`Connected to Graphiti MCP server via ${this.config.transport}.`);
+    } catch (err) {
+      throw formatConnectionError(this.config, err);
+    }
   }
 
   /**
@@ -69,7 +161,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     if (this.connected) {
       await this.client.close();
       this.connected = false;
-      console.log('[GraphitiMCPAdapter] Disconnected from Graphiti MCP server');
+      logger.debug('Disconnected from Graphiti MCP server.');
     }
   }
 
@@ -199,27 +291,41 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     }
   }
 
+  private unwrapCollection(result: unknown, key: 'nodes' | 'facts' | 'episodes'): GraphitiNodeResult[] {
+    if (Array.isArray(result)) {
+      return result as GraphitiNodeResult[];
+    }
+
+    if (!result || typeof result !== 'object') {
+      return [];
+    }
+
+    const envelope = result as GraphitiEnvelope;
+    if (typeof envelope.error === 'string' && envelope.error.length > 0) {
+      throw new Error(envelope.error);
+    }
+
+    const collection = envelope[key];
+    return Array.isArray(collection) ? collection : [];
+  }
+
   /**
    * Recall memories based on semantic query
    */
   async recall(query: string, options: RecallOptions): Promise<MemoryResult[]> {
     const results = await this.callTool('search_nodes', {
-      group_id: this.config.groupId,
+      group_ids: [this.config.groupId],
       query,
-      limit: options.limit,
-    }) as Array<{
-      uuid?: string;
-      name?: string;
-      summary?: string;
-      fact?: string;
-      valid_at?: string;
-    }>;
+      max_nodes: options.limit,
+    });
 
-    if (!results || results.length === 0) {
+    const nodes = this.unwrapCollection(results, 'nodes');
+
+    if (nodes.length === 0) {
       return [];
     }
 
-    return results.map((r) => this.convertToMemoryResult(r));
+    return nodes.map((r) => this.convertToMemoryResult(r));
   }
 
   /**
@@ -275,20 +381,22 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
    */
   async list(limit = 10, tier?: 'explicit' | 'silent' | 'ephemeral' | 'all'): Promise<MemoryResult[]> {
     const results = await this.callTool('get_episodes', {
-      group_id: this.config.groupId,
-      limit,
-    }) as Array<{
+      group_ids: [this.config.groupId],
+      max_episodes: limit,
+    });
+
+    const episodes = this.unwrapCollection(results, 'episodes') as Array<{
       uuid: string;
       name: string;
       content: string;
       created_at: string;
     }>;
 
-    if (!results || results.length === 0) {
+    if (episodes.length === 0) {
       return [];
     }
 
-    let memories = results.map((r) => ({
+    let memories = episodes.map((r) => ({
       id: r.uuid,
       content: this.extractContent(r.content),
       summary: r.content.substring(0, 200),
@@ -322,20 +430,16 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
   async searchByTimeRange(start: Date, end: Date, limit = 10): Promise<MemoryResult[]> {
     // Graphiti supports bi-temporal queries
     const results = await this.callTool('search_nodes', {
-      group_id: this.config.groupId,
+      group_ids: [this.config.groupId],
       query: '',
-      limit,
-    }) as Array<{
-      uuid?: string;
-      name?: string;
-      summary?: string;
-      fact?: string;
-      valid_at?: string;
-    }>;
+      max_nodes: limit,
+    });
 
-    if (!results) return [];
+    const nodes = this.unwrapCollection(results, 'nodes');
 
-    return results
+    if (nodes.length === 0) return [];
+
+    return nodes
       .filter((r) => {
         if (!r.valid_at) return false;
         const validAt = new Date(r.valid_at);
@@ -348,23 +452,19 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
    * Get related memories via graph traversal
    */
   async getRelated(id: string, depth = 2): Promise<MemoryResult[]> {
-    // Use search_facts to find related entities
-    const results = await this.callTool('search_facts', {
-      group_id: this.config.groupId,
+    const results = await this.callTool('search_memory_facts', {
+      group_ids: [this.config.groupId],
       query: id,
-      limit: depth * 5,
-    }) as Array<{
-      uuid?: string;
-      name?: string;
-      summary?: string;
-      fact?: string;
-    }>;
+      max_facts: depth * 5,
+    });
 
-    if (!results || results.length === 0) {
+    const facts = this.unwrapCollection(results, 'facts');
+
+    if (facts.length === 0) {
       return [];
     }
 
-    return results.map((r) => this.convertToMemoryResult(r));
+    return facts.map((r) => this.convertToMemoryResult(r));
   }
 
   /**
@@ -372,7 +472,10 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
    */
   async healthCheck(): Promise<HealthResult> {
     try {
-      await this.callTool('get_status', {});
+      const status = await this.callTool('get_status', {});
+      if (status && typeof status === 'object' && 'error' in (status as Record<string, unknown>)) {
+        throw new Error(String((status as Record<string, unknown>).error));
+      }
       return {
         healthy: true,
         backend: 'graphiti-mcp',
@@ -478,7 +581,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
       score: 10,
     });
 
-    console.log(`[GraphitiAdapter] Stored insight for ${sourceIds.length} source memories.`);
+    logger.info(`Stored insight for ${sourceIds.length} source memories.`);
 
     // 2. Create explicit relationship edges for each connection
     // We iterate the connections and call the Graphiti edge-creation tool
@@ -491,7 +594,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
           label: conn.relationship,
         });
       } catch (err) {
-        console.error(`[GraphitiAdapter] Failed to create edge ${conn.fromId} -> ${conn.toId}:`, err);
+        logger.error(`Failed to create edge ${conn.fromId} -> ${conn.toId}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -530,10 +633,10 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
           });
           updatedCount += 1;
         } else {
-          console.warn(`[GraphitiAdapter] Could not find source memory ${id} while marking memories as consolidated.`);
+          logger.warn(`Could not find source memory ${id} while marking memories as consolidated.`);
         }
       }
-      console.log(`[GraphitiAdapter] Marked ${updatedCount} source memories as consolidated.`);
+      logger.info(`Marked ${updatedCount} source memories as consolidated.`);
     }
   }
 
@@ -549,5 +652,5 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
  * Factory function to create Graphiti MCP adapter
  */
 export function createGraphitiMCPAdapter(config: GraphitiMCPConfig): MemoryAdapter {
-  return new GraphitiMCPAdapter(config);
+  return new GraphitiMCPAdapter(normalizeGraphitiMCPConfig(config));
 }

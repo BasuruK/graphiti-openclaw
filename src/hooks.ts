@@ -10,6 +10,9 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import { createMemoryScorer, DEFAULT_SCORING_CONFIG, type ScoringConfig, type ScoringResult, type ScoringModelConfig } from './memory-scorer.js';
+import { getLogger } from './logger.js';
+
+const logger = getLogger('hooks');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,7 +44,7 @@ function getCachedMemoryInstructions(): string {
     memoryInstructionsCache = { mtimeMs, value };
     return value;
   } catch (err) {
-    console.error('[nuron] Could not load MEMORY.md instructions:', err);
+    logger.error(`Could not load MEMORY.md instructions: ${err instanceof Error ? err.message : String(err)}`);
     return memoryInstructionsCache?.value ?? '';
   }
 }
@@ -98,7 +101,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     if (!prompt || prompt.length < config.minPromptLength) return;
 
     try {
-      console.log('[nuron] Auto-recall: Searching for relevant context...');
+      logger.debug('Auto-recall searching for relevant context.');
 
       const results = await adapter.recall(prompt, {
         limit: config.recallMaxFacts || 5,
@@ -113,7 +116,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
             .join('\n')
         : 'No relevant memories found.';
 
-      console.log(`[nuron] Auto-recall: Found ${results ? results.length : 0} relevant memories`);
+      logger.debug(`Auto-recall found ${results ? results.length : 0} relevant memories.`);
 
       const memoryInstructions = getCachedMemoryInstructions();
 
@@ -122,7 +125,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
         prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>\n\n<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`
       };
     } catch (err) {
-      console.error('[nuron] Auto-recall error:', err instanceof Error ? err.message : String(err));
+      logger.error(`Auto-recall error: ${err instanceof Error ? err.message : String(err)}`);
       // Don't fail - continue without memory
     }
   });
@@ -175,28 +178,28 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       }
 
       if (conversationSegments.length === 0) {
-        console.log('[nuron] Auto-capture: No meaningful messages to capture');
+        logger.debug('Auto-capture found no meaningful messages to capture.');
         return;
       }
 
       const sessionId = event.sessionId || 'unknown';
       const scoreResult = await scorer.scoreConversation(conversationSegments);
 
-      console.log(`[nuron] Auto-capture scored conversation ${scoreResult.score}/10 (${scoreResult.tier})`);
+      logger.debug(`Auto-capture scored conversation ${scoreResult.score}/10 (${scoreResult.tier}).`);
 
       if (scoreResult.recommendedAction === 'skip') {
-        console.log('[nuron] Auto-capture skipped low-importance conversation');
+        logger.debug('Auto-capture skipped low-importance conversation.');
         return;
       }
 
       await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
 
       if (scoreResult.tier === 'explicit' && scoringConfig.notifyOnExplicit) {
-        console.log('[nuron] Auto-capture stored an explicit memory');
+        logger.info('Auto-capture stored an explicit memory.');
       }
 
     } catch (err) {
-      console.error('[nuron] Auto-capture error:', err instanceof Error ? err.message : String(err));
+      logger.error(`Auto-capture error: ${err instanceof Error ? err.message : String(err)}`);
       // Don't fail - continue normally
     }
   });
@@ -210,7 +213,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     const now = Date.now();
     if (now - lastMaintenanceAt < intervalMs) return;
 
-    console.log('[nuron] Running scheduled memory maintenance...');
+    logger.info('Running scheduled memory maintenance.');
 
     // Legacy Scorers: Only run if explicitly enabled (opt-in)
     if (config.scoringLegacyEnabled === true || config.scoringLegacyMode === true) {
@@ -218,20 +221,20 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       try {
         const cleanup = await scorer.cleanupExpiredMemories();
         if (cleanup.deleted > 0) {
-          console.log(`[nuron] Cleaned up ${cleanup.deleted} expired memories`);
+          logger.info(`Cleaned up ${cleanup.deleted} expired memories.`);
         }
       } catch (err) {
-        console.error('[nuron] Cleanup failed:', err instanceof Error ? err.message : String(err));
+        logger.error(`Cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
       }
 
       // Process reinforcements (isolated — runs even if cleanup failed)
       try {
         const reinforcements = await scorer.processReinforcements();
         if (reinforcements.upgraded > 0 || reinforcements.downgraded > 0) {
-          console.log(`[nuron] Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded`);
+          logger.info(`Memory adjustments: +${reinforcements.upgraded} upgraded, -${reinforcements.downgraded} downgraded.`);
         }
       } catch (err) {
-        console.error('[nuron] Reinforcement processing failed:', err instanceof Error ? err.message : String(err));
+        logger.error(`Reinforcement processing failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -239,16 +242,16 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     try {
       const dispatched = await dispatchAxonTrigger(api, config);
       if (dispatched) {
-        console.log('[nuron] Dispatched synthesis trigger to Axon agent.');
+        logger.info('Dispatched synthesis trigger to Axon agent.');
       }
     } catch (err) {
-      console.error('[nuron] Axon Agent trigger failed:', err instanceof Error ? err.message : String(err));
+      logger.error(`Axon Agent trigger failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     lastMaintenanceAt = now;
   });
 
-  console.log('[nuron] Hooks registered with adaptive scoring');
+  logger.info('Hooks registered with adaptive scoring.');
 }
 
 async function storeWithMetadata(
@@ -295,7 +298,7 @@ async function dispatchAxonTrigger(api: any, config: any): Promise<boolean> {
         : undefined;
 
   if (!dispatchHook) {
-    console.warn('[nuron] Axon dispatch is enabled but no supported dispatch hook is available; skipping trigger.');
+    logger.warn('Axon dispatch is enabled but no supported dispatch hook is available; skipping trigger.');
     return false;
   }
 

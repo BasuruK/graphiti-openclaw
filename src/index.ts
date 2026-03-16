@@ -22,9 +22,93 @@ import { registerHooks } from './hooks.js';
 import { adapterFactory, createAdapterFromConfig } from './adapters/factory.js';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import type { BackendConfig } from './adapters/memory-adapter.js';
+import { configureLogger, getLogger, type LogLevel } from './logger.js';
+
+const logger = getLogger();
+
+type ResolvedPluginConfig = Record<string, unknown> & {
+  backend: 'graphiti-mcp' | 'auto';
+  endpoint: string;
+  transport: 'stdio' | 'sse' | 'http';
+  groupId: string;
+  logLevel: LogLevel;
+  autoCapture: boolean;
+  autoRecall: boolean;
+  recallMaxFacts: number;
+  minPromptLength: number;
+  scoringEnabled: boolean;
+  scoringLegacyEnabled: boolean;
+  scoringLegacyMode: boolean;
+  scoringExplicitThreshold: number;
+  scoringEphemeralThreshold: number;
+  scoringEphemeralHours: number;
+  scoringSilentDays: number;
+  scoringCleanupHours: number;
+  scoringNotifyExplicit: boolean;
+  scoringAskBeforeDowngrade: boolean;
+  scoringMinConversationLength: number;
+  scoringMinMessageCount: number;
+  scoringDefaultTier: 'explicit' | 'silent' | 'ephemeral';
+  axonDispatchEnabled: boolean;
+};
 
 /** Previous plugin IDs for migration compatibility */
 const LEGACY_PLUGIN_IDS = ['graphiti', 'graphiti-memory'];
+
+let processCleanupRegistered = false;
+let processCleanupHandler: (() => Promise<void>) | null = null;
+
+function formatError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function registerProcessCleanup(handler: () => Promise<void>): void {
+  processCleanupHandler = handler;
+
+  if (processCleanupRegistered) {
+    return;
+  }
+
+  processCleanupRegistered = true;
+
+  let cleaningUp = false;
+
+  const runCleanup = async (reason: string, exitAfterCleanup = false) => {
+    if (cleaningUp) {
+      return;
+    }
+
+    cleaningUp = true;
+    logger.debug(`Process cleanup triggered by ${reason}.`);
+
+    try {
+      await processCleanupHandler?.();
+    } catch (err) {
+      logger.error(`Process cleanup failed: ${formatError(err)}`);
+    } finally {
+      cleaningUp = false;
+      if (exitAfterCleanup) {
+        process.exit(0);
+      }
+    }
+  };
+
+  const bindSignal = (signal: NodeJS.Signals) => {
+    process.once(signal, () => {
+      void runCleanup(signal, true);
+    });
+  };
+
+  process.once('disconnect', () => {
+    void runCleanup('disconnect', true);
+  });
+
+  bindSignal('SIGINT');
+  bindSignal('SIGTERM');
+  if (process.platform !== 'win32') {
+    bindSignal('SIGHUP');
+  }
+}
 
 /**
  * Migrate settings persisted under a legacy plugin ID to the current one.
@@ -40,7 +124,7 @@ function migratePluginSettings(api: any, currentId: string): void {
 
       const oldSettings = typeof store.get === 'function' ? store.get(oldId) : undefined;
       if (oldSettings) {
-        console.log(`[nuron] Migrating persisted settings from legacy ID '${oldId}' to '${currentId}'`);
+        logger.info(`Migrating persisted settings from legacy ID '${oldId}' to '${currentId}'`);
         if (typeof store.set === 'function') {
           store.set(currentId, oldSettings);
         }
@@ -49,7 +133,7 @@ function migratePluginSettings(api: any, currentId: string): void {
         }
       }
     } catch (err) {
-      console.warn(`[nuron] Settings migration from '${oldId}' failed:`, err instanceof Error ? err.message : String(err));
+      logger.warn(`Settings migration from '${oldId}' failed: ${formatError(err)}`);
     }
   }
 }
@@ -64,23 +148,23 @@ function validateScoringConfig(config: Record<string, unknown>): void {
   const explicitThreshold = config.scoringExplicitThreshold as number | undefined;
 
   if (ephemeralThreshold != null && ephemeralThreshold < 0) {
-    console.warn('[nuron] scoringEphemeralThreshold must be >= 0, clamping to 0');
+    logger.warn('scoringEphemeralThreshold must be >= 0, clamping to 0');
     config.scoringEphemeralThreshold = 0;
   }
   if (explicitThreshold != null && ephemeralThreshold != null && explicitThreshold <= ephemeralThreshold) {
-    console.warn('[nuron] scoringExplicitThreshold must be > scoringEphemeralThreshold, adjusting');
+    logger.warn('scoringExplicitThreshold must be > scoringEphemeralThreshold, adjusting');
     config.scoringExplicitThreshold = (ephemeralThreshold as number) + 1;
   }
   if (config.scoringEphemeralHours != null && (config.scoringEphemeralHours as number) < 1) {
-    console.warn('[nuron] scoringEphemeralHours must be >= 1, clamping to 1');
+    logger.warn('scoringEphemeralHours must be >= 1, clamping to 1');
     config.scoringEphemeralHours = 1;
   }
   if (config.scoringSilentDays != null && (config.scoringSilentDays as number) < 1) {
-    console.warn('[nuron] scoringSilentDays must be >= 1, clamping to 1');
+    logger.warn('scoringSilentDays must be >= 1, clamping to 1');
     config.scoringSilentDays = 1;
   }
   if (config.scoringCleanupHours != null && (config.scoringCleanupHours as number) < 1) {
-    console.warn('[nuron] scoringCleanupHours must be >= 1, clamping to 1');
+    logger.warn('scoringCleanupHours must be >= 1, clamping to 1');
     config.scoringCleanupHours = 1;
   }
 
@@ -107,6 +191,35 @@ function validateScoringConfig(config: Record<string, unknown>): void {
   }
 }
 
+export function resolvePluginConfig(rawConfig: Record<string, unknown>): ResolvedPluginConfig {
+  return {
+    backend: 'graphiti-mcp',
+    endpoint: 'http://localhost:8000/mcp/',
+    transport: 'http',
+    groupId: 'default',
+    logLevel: 'warn',
+    autoCapture: true,
+    autoRecall: true,
+    recallMaxFacts: 5,
+    minPromptLength: 20,
+    scoringEnabled: true,
+    scoringLegacyEnabled: false,
+    scoringLegacyMode: false,
+    scoringExplicitThreshold: 8,
+    scoringEphemeralThreshold: 4,
+    scoringEphemeralHours: 72,
+    scoringSilentDays: 30,
+    scoringCleanupHours: 12,
+    scoringNotifyExplicit: true,
+    scoringAskBeforeDowngrade: true,
+    scoringMinConversationLength: 50,
+    scoringMinMessageCount: 1,
+    scoringDefaultTier: 'silent',
+    axonDispatchEnabled: false,
+    ...rawConfig,
+  };
+}
+
 export default {
   id: 'nuron',
   /** Legacy IDs for migration compatibility */
@@ -129,19 +242,25 @@ export default {
       // Connection - Graphiti MCP
       endpoint: {
         type: 'string',
-        default: 'http://localhost:8000/sse',
-        description: 'Graphiti MCP server endpoint (for graphiti-mcp backend). When transport is sse, include the /sse path.'
+        default: 'http://localhost:8000/mcp/',
+        description: 'Graphiti MCP server endpoint. Use /mcp/ for transport=http, or /sse for legacy SSE servers.'
       },
       transport: {
         type: 'string',
-        enum: ['stdio', 'sse'],
-        default: 'sse',
+        enum: ['stdio', 'sse', 'http'],
+        default: 'http',
         description: 'Graphiti MCP transport type'
       },
       groupId: {
         type: 'string',
         default: 'default',
         description: 'Memory group ID for all conversations'
+      },
+      logLevel: {
+        type: 'string',
+        enum: ['silent', 'error', 'warn', 'info', 'debug'],
+        default: 'warn',
+        description: 'Controls Nuron plugin logging verbosity. Use warn for quiet operation, debug for transport troubleshooting.'
       },
 
       // Deprecated legacy block kept only so older saved configs still parse cleanly.
@@ -309,7 +428,8 @@ export default {
   },
 
   async register(api: any) {
-    const config = api?.pluginConfig ?? {};
+    const config = resolvePluginConfig(api?.pluginConfig ?? {});
+    configureLogger(api?.logger, config.logLevel);
 
     // Migrate settings from legacy plugin IDs
     migratePluginSettings(api, 'nuron');
@@ -320,13 +440,15 @@ export default {
     // Safe logging - don't expose secrets
     const safeConfig = {
       backend: config.backend || 'graphiti-mcp',
-      endpoint: config.endpoint ? '[configured]' : 'http://localhost:8000/sse',
+      transport: config.transport || 'http',
+      endpoint: config.endpoint ? '[configured]' : 'http://localhost:8000/mcp/',
       groupId: config.groupId ?? 'default',
+      logLevel: config.logLevel,
       autoCapture: config.autoCapture,
       autoRecall: config.autoRecall,
       scoringEnabled: config.scoringEnabled
     };
-    console.log('[nuron] Registering plugin with config:', safeConfig);
+    logger.debug(`Registering plugin with config: ${JSON.stringify(safeConfig)}`);
 
     // Create adapter based on configuration
     let adapter: MemoryAdapter;
@@ -336,7 +458,7 @@ export default {
       const backendType = config.backend || 'graphiti-mcp';
 
       if (backendType === 'auto') {
-        console.log('[nuron] Auto-detecting Graphiti memory backend...');
+        logger.info('Auto-detecting Graphiti memory backend.');
         // Map plugin config to BackendConfig shape for auto-detection
         const backendConfig: Partial<BackendConfig> = {};
         if (config.endpoint) (backendConfig as any).endpoint = config.endpoint;
@@ -344,11 +466,11 @@ export default {
         if (config.groupId) (backendConfig as any).groupId = config.groupId;
         adapter = await adapterFactory.autoDetect(backendConfig);
       } else if (backendType === 'graphiti-mcp') {
-        console.log('[nuron] Using Graphiti MCP backend...');
+        logger.info('Using Graphiti MCP backend.');
         adapter = adapterFactory.create({
           type: 'graphiti-mcp',
-          transport: config.transport || 'sse',
-          endpoint: config.endpoint || 'http://localhost:8000/sse',
+          transport: config.transport || 'http',
+          endpoint: config.endpoint || 'http://localhost:8000/mcp/',
           groupId: config.groupId || 'default'
         });
       } else {
@@ -361,13 +483,13 @@ export default {
       // Verify connection
       const health = await adapter.healthCheck();
       if (!health.healthy) {
-        console.warn('[nuron] Warning: Memory backend not healthy:', health.details);
+        logger.warn(`Memory backend not healthy: ${String(health.details ?? 'no details provided')}`);
       } else {
-        console.log(`[nuron] Connected to ${health.backend} backend`);
+        logger.info(`Connected to ${health.backend} backend.`);
       }
 
     } catch (err) {
-      console.error('[nuron] Failed to initialize memory backend:', err instanceof Error ? err.message : String(err));
+      logger.error(`Failed to initialize memory backend: ${formatError(err)}`);
       throw err;
     }
 
@@ -380,13 +502,15 @@ export default {
     // Register shutdown handler if the host API supports it
     const shutdownHandler = async () => {
       try {
-        console.log('[nuron] Shutting down...');
+        logger.debug('Shutting down memory backend.');
         await adapter.shutdown();
-        console.log('[nuron] Shutdown complete');
+        logger.debug('Shutdown complete.');
       } catch (err) {
-        console.error('[nuron] Shutdown error:', err instanceof Error ? err.message : String(err));
+        logger.error(`Shutdown error: ${formatError(err)}`);
       }
     };
+
+    registerProcessCleanup(shutdownHandler);
 
     if (typeof api?.onShutdown === 'function') {
       api.onShutdown(shutdownHandler);
@@ -394,6 +518,6 @@ export default {
       api.on('shutdown', shutdownHandler);
     }
 
-    console.log('[nuron] Plugin registered successfully with Memory Cortex');
+    logger.info('Plugin registered successfully with Memory Cortex.');
   }
 };

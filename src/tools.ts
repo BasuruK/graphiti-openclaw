@@ -14,10 +14,24 @@
 
 import { Type } from '@sinclair/typebox';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
+import { getLogger } from './logger.js';
+
+const logger = getLogger('tools');
 
 /** Valid memory tier values */
 const VALID_TIERS = ['explicit', 'silent', 'ephemeral', 'all'] as const;
 type MemoryTier = typeof VALID_TIERS[number];
+
+const TOOL_SOURCE = 'Source: Nuron OpenClaw plugin.';
+const BACKEND_PATH = 'Backend path for storage and recall operations: Nuron tool -> Graphiti MCP server -> Neo4j temporal knowledge graph.';
+
+function describeTool(purpose: string, inputs: string, returns: string): string {
+  return `${purpose} ${TOOL_SOURCE} Inputs: ${inputs} Returns: ${returns}`;
+}
+
+function describeBackendTool(purpose: string, inputs: string, returns: string): string {
+  return `${purpose} ${TOOL_SOURCE} ${BACKEND_PATH} Inputs: ${inputs} Returns: ${returns}`;
+}
 
 /**
  * Validate and normalize a tier string to a valid MemoryTier.
@@ -40,12 +54,16 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Recall - Search memories
   api.registerTool({
     name: 'memory_recall',
-    label: 'Memory Recall',
-    description: 'Search through long-term memories. Use when user asks about past conversations, preferences, facts, or context from previous sessions.',
+    label: 'Nuron Memory Recall',
+    description: describeBackendTool(
+      'Search long-term memory for past conversations, preferences, facts, and prior session context.',
+      'query string, optional result limit, optional tier filter.',
+      'A formatted memory list and structured recall results with memory metadata.'
+    ),
     parameters: Type.Object({
-      query: Type.String({ description: 'Search query' }),
-      limit: Type.Optional(Type.Number({ default: 5, description: 'Maximum results' })),
-      tier: Type.Optional(Type.String({ description: 'Filter by tier: explicit, silent, ephemeral, or all', default: 'all' }))
+      query: Type.String({ description: 'Natural-language search query sent to Nuron recall over Graphiti MCP.' }),
+      limit: Type.Optional(Type.Number({ default: 5, description: 'Maximum number of memory results to return.' })),
+      tier: Type.Optional(Type.String({ description: 'Optional tier filter: explicit, silent, ephemeral, or all.', default: 'all' }))
     }),
     async execute(toolCallId: string, params: { query: string; limit?: number; tier?: string }) {
       try {
@@ -84,12 +102,16 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Store - Store important info
   api.registerTool({
     name: 'memory_store',
-    label: 'Memory Store',
-    description: 'Store important information to remember long-term. Use when user says "remember that", "dont forget", or shares preferences, important facts, or context.',
+    label: 'Nuron Memory Store',
+    description: describeBackendTool(
+      'Store information into long-term memory when the user shares durable preferences, facts, or explicit reminders.',
+      'memory content, optional display name, optional storage tier.',
+      'A confirmation with the stored memory ID and chosen tier.'
+    ),
     parameters: Type.Object({
-      content: Type.String({ description: 'Content to remember' }),
-      name: Type.Optional(Type.String({ description: 'Optional name for this memory' })),
-      tier: Type.Optional(Type.String({ description: 'Memory tier: explicit (permanent), silent (30d), ephemeral (72h)', default: 'silent' }))
+      content: Type.String({ description: 'The fact, preference, or reminder to persist through Nuron.' }),
+      name: Type.Optional(Type.String({ description: 'Optional human-friendly name for this memory.' })),
+      tier: Type.Optional(Type.String({ description: 'Optional storage tier: explicit (permanent), silent (30d), or ephemeral (72h).', default: 'silent' }))
     }),
     async execute(toolCallId: string, params: { content: string; name?: string; tier?: string }) {
       try {
@@ -120,11 +142,15 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory List - Browse memories with filters
   api.registerTool({
     name: 'memory_list',
-    label: 'Memory List',
-    description: 'List recent memories with optional filtering by tier. Useful for browsing what has been stored.',
+    label: 'Nuron Memory List',
+    description: describeBackendTool(
+      'Browse recently stored Nuron memories, optionally filtered by memory tier.',
+      'optional result limit and optional tier filter.',
+      'A formatted list of recent memories and structured memory objects.'
+    ),
     parameters: Type.Object({
-      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum memories to list' })),
-      tier: Type.Optional(Type.String({ description: 'Filter by tier: explicit, silent, ephemeral, or all', default: 'all' }))
+      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum number of memories to return.' })),
+      tier: Type.Optional(Type.String({ description: 'Optional tier filter: explicit, silent, ephemeral, or all.', default: 'all' }))
     }),
     async execute(toolCallId: string, params: { limit?: number; tier?: string }) {
       try {
@@ -163,10 +189,14 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Forget - Delete a memory
   api.registerTool({
     name: 'memory_forget',
-    label: 'Memory Forget',
-    description: 'Delete a specific memory by ID. Use when user wants to remove incorrect or outdated information.',
+    label: 'Nuron Memory Forget',
+    description: describeBackendTool(
+      'Delete a specific Nuron memory when stored information is incorrect, outdated, or should be removed.',
+      'the target memory UUID.',
+      'A deletion confirmation or an error if the memory cannot be removed.'
+    ),
     parameters: Type.Object({
-      uuid: Type.String({ description: 'UUID of the memory to delete' })
+      uuid: Type.String({ description: 'UUID of the Nuron memory to delete.' })
     }),
     async execute(toolCallId: string, params: { uuid: string }) {
       try {
@@ -189,8 +219,12 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Status - Check health
   api.registerTool({
     name: 'memory_status',
-    label: 'Memory Status',
-    description: 'Check the health and status of the memory system.',
+    label: 'Nuron Memory Status',
+    description: describeBackendTool(
+      'Check Nuron memory system health, backend connectivity, and high-level memory counts.',
+      'no parameters.',
+      'Backend health, storage statistics, and tier counts.'
+    ),
     parameters: Type.Object({}),
     async execute(toolCallId: string, params: {}) {
       try {
@@ -227,10 +261,14 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Read Unconsolidated Memories - For Axon Agent
   api.registerTool({
     name: 'read_unconsolidated_memories',
-    label: 'Read Unconsolidated Memories',
-    description: 'Fetch a batch of raw, unconsolidated memories that need to be synthesized by the Axon agent.',
+    label: 'Nuron Read Unconsolidated Memories',
+    description: describeBackendTool(
+      'Fetch raw Nuron memories that have not yet been consolidated. This is primarily for the Axon synthesis workflow.',
+      'optional batch size limit.',
+      'A batch of unconsolidated memory records ready for synthesis.'
+    ),
     parameters: Type.Object({
-      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum memories to fetch' }))
+      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum number of unconsolidated memories to fetch.' }))
     }),
     async execute(toolCallId: string, params: { limit?: number }) {
       try {
@@ -266,19 +304,23 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Consolidate Batch - For Axon Agent to commit synthesis
   api.registerTool({
     name: 'memory_consolidate_batch',
-    label: 'Memory Consolidate Batch',
-    description: 'Store the results of a memory synthesis cycle. Marks source memories as consolidated, creates an insight, and writes semantic graph connections.',
+    label: 'Nuron Memory Consolidate Batch',
+    description: describeBackendTool(
+      'Commit the result of an Axon synthesis cycle by creating an insight, writing graph connections, and marking source memories as consolidated.',
+      'source memory IDs, a summary, one synthesized insight, and semantic connections.',
+      'A consolidation confirmation with processed source count and connection count.'
+    ),
     parameters: Type.Object({
-      sourceIds: Type.Array(Type.String(), { description: 'IDs of the memories that were synthesized' }),
-      summary: Type.String({ description: 'A synthesized summary combining the key facts' }),
-      insight: Type.String({ description: 'ONE key overarching insight or hidden pattern found' }),
+      sourceIds: Type.Array(Type.String(), { description: 'IDs of the source memories that were synthesized into one insight.' }),
+      summary: Type.String({ description: 'Synthesized summary combining the source memories.' }),
+      insight: Type.String({ description: 'One overarching insight or hidden pattern extracted from the source memories.' }),
       connections: Type.Array(
         Type.Object({
           fromId: Type.String(),
           toId: Type.String(),
-          relationship: Type.String({ description: 'Capitalized verb (e.g., RELATES_TO, CONTRADICTS)' })
+          relationship: Type.String({ description: 'Capitalized edge label such as RELATES_TO or CONTRADICTS.' })
         }),
-        { description: 'Semantic connections between the memories' }
+        { description: 'Semantic graph connections to write between the memories.' }
       )
     }),
     async execute(toolCallId: string, params: {
@@ -332,10 +374,14 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Analyze - Score/assess a memory's importance
   api.registerTool({
     name: 'memory_analyze',
-    label: 'Memory Analyze',
-    description: 'Analyze content to predict its importance score (0-10) and recommended storage tier.',
+    label: 'Nuron Memory Analyze',
+    description: describeTool(
+      'Analyze candidate memory content and estimate its importance score and recommended storage tier before saving.',
+      'one content string to analyze.',
+      'A predicted importance score, recommended tier, and analysis rationale.'
+    ),
     parameters: Type.Object({
-      content: Type.String({ description: 'Content to analyze' })
+      content: Type.String({ description: 'Candidate memory content to score and classify.' })
     }),
     async execute(toolCallId: string, params: { content: string }) {
       try {
@@ -379,5 +425,5 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }
   }, { name: 'memory_analyze' });
 
-  console.log('[nuron] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, read_unconsolidated_memories, memory_consolidate_batch, memory_analyze');
+  logger.info('Registered memory tools.');
 }

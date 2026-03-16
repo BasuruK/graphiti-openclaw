@@ -17,19 +17,25 @@
       },
       "endpoint": {
         "type": "string",
-        "default": "http://localhost:8000/sse",
-        "description": "Graphiti MCP server endpoint (for graphiti-mcp backend). When transport is 'sse', this should include the /sse path."
+        "default": "http://localhost:8000/mcp/",
+        "description": "Graphiti MCP server endpoint. Use /mcp/ for transport=http, or /sse for legacy SSE servers."
       },
       "transport": {
         "type": "string",
-        "enum": ["stdio", "sse"],
-        "default": "sse",
+        "enum": ["stdio", "sse", "http"],
+        "default": "http",
         "description": "Graphiti MCP transport type"
       },
       "groupId": {
         "type": "string",
         "default": "default",
         "description": "Memory group ID for all conversations"
+      },
+      "logLevel": {
+        "type": "string",
+        "enum": ["silent", "error", "warn", "info", "debug"],
+        "default": "warn",
+        "description": "Controls Nuron plugin logging verbosity. Use warn for quiet operation, debug for transport troubleshooting."
       },
       "neo4j": {
         "type": "object",

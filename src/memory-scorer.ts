@@ -7,6 +7,9 @@
 
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import type { MemoryResult } from './adapters/memory-adapter.js';
+import { getLogger } from './logger.js';
+
+const logger = getLogger('scorer');
 
 /**
  * Configuration for an optional local scoring model (llama.cpp or OpenAI-compatible).
@@ -125,9 +128,8 @@ export class MemoryScorer {
 
     // Validate threshold invariant
     if (merged.ephemeralThreshold >= merged.explicitThreshold) {
-      console.warn(
-        `[MemoryScorer] Invalid thresholds in updateConfig: ephemeralThreshold (${merged.ephemeralThreshold}) >= ` +
-        `explicitThreshold (${merged.explicitThreshold}). Keeping previous thresholds, applying other fields.`
+      logger.warn(
+        `Invalid thresholds in updateConfig: ephemeralThreshold (${merged.ephemeralThreshold}) >= explicitThreshold (${merged.explicitThreshold}). Keeping previous thresholds, applying other fields.`
       );
       // Restore thresholds from previous config but apply everything else
       merged.ephemeralThreshold = this.config.ephemeralThreshold;
@@ -186,7 +188,7 @@ export class MemoryScorer {
       try {
         return await this.scoreWithLocalModel(fullContent, segments, modelCfg);
       } catch (err) {
-        console.warn('[MemoryScorer] Local model scoring failed, falling back to heuristics:', err);
+        logger.warn(`Local model scoring failed, falling back to heuristics: ${err instanceof Error ? err.message : String(err)}`);
         // Fall through to heuristic scoring
       }
     }
@@ -204,7 +206,7 @@ export class MemoryScorer {
         recallResults = await this.adapter.recall(fullContent, { limit: 10 });
       }
     } catch (err) {
-      console.warn('[MemoryScorer] Batch recall failed:', err);
+      logger.warn(`Batch recall failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const repetitionScore = this.checkRepetitionFromResults(recallResults, segments);
@@ -625,15 +627,15 @@ export class MemoryScorer {
    * Cleanup ephemeral memories that have expired
    */
   async cleanupExpiredMemories(): Promise<{ deleted: number; upgraded: number }> {
-    console.log('[MemoryScorer] Running cleanup of expired ephemeral memories...');
+    logger.info('Running cleanup of expired ephemeral memories.');
 
     try {
       // Use adapter's cleanup method
       const result = await this.adapter.cleanup();
-      console.log(`[MemoryScorer] Cleanup complete: deleted ${result.deleted}, upgraded ${result.upgraded}`);
+      logger.info(`Cleanup complete: deleted ${result.deleted}, upgraded ${result.upgraded}.`);
       return result;
     } catch (err) {
-      console.error('[MemoryScorer] Cleanup failed:', err);
+      logger.error(`Cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
       return { deleted: 0, upgraded: 0 };
     }
   }
@@ -642,14 +644,14 @@ export class MemoryScorer {
    * Check and upgrade memories based on reinforcement
    */
   async processReinforcements(): Promise<{ upgraded: number; downgraded: number }> {
-    console.log('[MemoryScorer] Processing memory reinforcements...');
+    logger.info('Processing memory reinforcements.');
 
     let ephemeralMemories;
     try {
       // Get all ephemeral memories — if this fails, we can't proceed
       ephemeralMemories = await this.adapter.list(50, 'ephemeral');
     } catch (err) {
-      console.error('[MemoryScorer] Failed to list ephemeral memories:', err);
+      logger.error(`Failed to list ephemeral memories: ${err instanceof Error ? err.message : String(err)}`);
       return { upgraded: 0, downgraded: 0 };
     }
 
@@ -667,15 +669,15 @@ export class MemoryScorer {
             tier: 'silent',
           });
           upgraded++;
-          console.log(`[MemoryScorer] Upgraded ephemeral to silent: ${memory.id}`);
+          logger.info(`Upgraded ephemeral to silent: ${memory.id}.`);
         }
       } catch (err) {
         // Log per-memory failure and continue with remaining memories
-        console.error(`[MemoryScorer] Failed to process reinforcement for memory ${memory.id}:`, err);
+        logger.error(`Failed to process reinforcement for memory ${memory.id}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
-    console.log(`[MemoryScorer] Reinforcement processing complete: +${upgraded} upgraded`);
+    logger.info(`Reinforcement processing complete: +${upgraded} upgraded.`);
     return { upgraded, downgraded: 0 };
   }
 }

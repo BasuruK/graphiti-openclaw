@@ -109,12 +109,12 @@ export interface HealthResult {
 export interface GraphitiMCPConfig {
   type: 'graphiti-mcp';
   /** MCP transport type */
-  transport: 'stdio' | 'sse';
+  transport: 'stdio' | 'sse' | 'http';
   /** For stdio: command to run (e.g., 'uv', 'python') */
   command?: string;
   /** For stdio: command arguments */
   args?: string[];
-  /** For SSE: endpoint URL */
+  /** For HTTP/SSE: endpoint URL */
   endpoint?: string;
   /** Memory group ID */
   groupId: string;

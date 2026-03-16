@@ -41,8 +41,8 @@ plugins:
       enabled: true
       config:
         backend: "graphiti-mcp"
-        transport: "sse"
-        endpoint: "http://localhost:8000/sse"
+        transport: "http"
+        endpoint: "http://localhost:8000/mcp/"
         groupId: "default"
         autoRecall: true
         autoCapture: true
