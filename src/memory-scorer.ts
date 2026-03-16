@@ -80,6 +80,18 @@ export interface ConversationSegment {
   hasExplicitMarker?: boolean;     // "remember", "important", "don't forget"
 }
 
+type ConversationBreakdown = {
+  userSegments: ConversationSegment[];
+  assistantSegments: ConversationSegment[];
+  userContent: string;
+  assistantContent: string;
+  fullContent: string;
+  totalLength: number;
+  userLength: number;
+  assistantLength: number;
+  userShare: number;
+};
+
 interface ScoringFactors {
   explicit_emphasis: number;
   emotional_weight: number;
@@ -151,6 +163,8 @@ export class MemoryScorer {
    *      across repetition / context-anchoring / novelty checks (previously 3 separate calls).
    */
   async scoreConversation(segments: ConversationSegment[]): Promise<ScoringResult> {
+    const breakdown = this.buildConversationBreakdown(segments);
+
     // ── Disabled fast-path ──────────────────────────────────────────────
     if (!this.config.enabled) {
       const tier = this.config.defaultTier;
@@ -163,16 +177,22 @@ export class MemoryScorer {
       };
     }
 
-    const fullContent = segments.map(s => s.content).join('\n');
-
     // ── Conversation gating ─────────────────────────────────────────────
-    const totalLength = segments.reduce((sum, s) => sum + s.content.length, 0);
+    if (breakdown.userSegments.length === 0) {
+      return {
+        score: 1,
+        tier: 'ephemeral',
+        reasoning: 'No user-led content detected – skipping storage',
+        recommendedAction: 'skip'
+      };
+    }
+
     if (
-      totalLength < this.config.minConversationLength ||
-      segments.length < this.config.minMessageCount
+      breakdown.totalLength < this.config.minConversationLength ||
+      breakdown.userSegments.length < this.config.minMessageCount
     ) {
       // Check for explicit markers even in short messages
-      if (!this.detectExplicitMarkers(fullContent)) {
+      if (!this.detectExplicitMarkers(breakdown.userContent)) {
         return {
           score: 2,
           tier: 'ephemeral',
@@ -182,11 +202,22 @@ export class MemoryScorer {
       }
     }
 
+    if (breakdown.userShare < 0.25 && !this.detectExplicitMarkers(breakdown.userContent)) {
+      return {
+        score: 1,
+        tier: 'ephemeral',
+        reasoning: 'Conversation is mostly assistant response content – skipping storage',
+        recommendedAction: 'skip'
+      };
+    }
+
+    const fullContent = breakdown.fullContent;
+
     // ── Local model scoring (llama.cpp / OpenAI-compatible) ─────────────
     const modelCfg = this.config.scoringModel;
     if (modelCfg && modelCfg.provider !== 'none') {
       try {
-        return await this.scoreWithLocalModel(fullContent, segments, modelCfg);
+        return await this.scoreWithLocalModel(breakdown, modelCfg);
       } catch (err) {
         logger.warn(`Local model scoring failed, falling back to heuristics: ${err instanceof Error ? err.message : String(err)}`);
         // Fall through to heuristic scoring
@@ -194,24 +225,24 @@ export class MemoryScorer {
     }
 
     // ── Heuristic scoring (single recall call) ──────────────────────────
-    const hasExplicit = this.detectExplicitMarkers(fullContent);
-    const emotionalWeight = this.detectEmotionalContent(fullContent);
-    const timeSensitivity = this.detectTimeSensitivity(fullContent);
-    const futureUtility = await this.predictFutureUtility(fullContent, segments);
+    const hasExplicit = this.detectExplicitMarkers(breakdown.userContent);
+    const emotionalWeight = this.detectEmotionalContent(breakdown.userContent);
+    const timeSensitivity = this.detectTimeSensitivity(breakdown.userContent);
+    const futureUtility = await this.predictFutureUtility(breakdown.userContent, breakdown.userSegments);
 
     // ** SINGLE recall call — results shared across 3 checks **
     let recallResults: MemoryResult[] = [];
     try {
-      if (fullContent.length >= 20) {
-        recallResults = await this.adapter.recall(fullContent, { limit: 10 });
+      if (breakdown.userContent.length >= 20) {
+        recallResults = await this.adapter.recall(breakdown.userContent, { limit: 10 });
       }
     } catch (err) {
       logger.warn(`Batch recall failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const repetitionScore = this.checkRepetitionFromResults(recallResults, segments);
+    const repetitionScore = this.checkRepetitionFromResults(recallResults, breakdown.userSegments);
     const contextAnchoring = this.checkContextAnchoringFromResults(recallResults);
-    const novelty = this.checkNoveltyFromResults(recallResults, fullContent);
+    const novelty = this.checkNoveltyFromResults(recallResults, breakdown.userContent);
 
     // Calculate weighted score
     let score = this.calculateWeightedScore({
@@ -223,6 +254,8 @@ export class MemoryScorer {
       context_anchoring: contextAnchoring,
       novelty: novelty
     });
+
+    score = this.applyUserLedScoreAdjustments(score, breakdown, hasExplicit);
 
     // Determine tier based on thresholds
     const tier = this.determineTier(score);
@@ -246,6 +279,59 @@ export class MemoryScorer {
       expiresInHours,
       recommendedAction
     };
+  }
+
+  private buildConversationBreakdown(segments: ConversationSegment[]): ConversationBreakdown {
+    const userSegments = segments.filter((segment) => segment.role === 'user');
+    const assistantSegments = segments.filter((segment) => segment.role === 'assistant');
+    const userContent = userSegments.map((segment) => segment.content).join('\n');
+    const assistantContent = assistantSegments.map((segment) => segment.content).join('\n');
+    const fullContent = segments.map((segment) => segment.content).join('\n');
+    const userLength = userContent.length;
+    const assistantLength = assistantContent.length;
+    const totalLength = userLength + assistantLength;
+
+    return {
+      userSegments,
+      assistantSegments,
+      userContent,
+      assistantContent,
+      fullContent,
+      totalLength,
+      userLength,
+      assistantLength,
+      userShare: totalLength > 0 ? userLength / totalLength : 0,
+    };
+  }
+
+  private hasDurableUserSignal(content: string): boolean {
+    const lowerContent = content.toLowerCase();
+    const patterns = [
+      /\b(i prefer|i like|i dislike|i hate|i love|my preference|for me)\b/,
+      /\b(remember|don't forget|dont forget|keep in mind|save this|store this)\b/,
+      /\b(we decided|decision|plan|next step|todo|task|deadline|due|remind me|schedule|appointment)\b/,
+      /\b(i need|we need|i will|we will|must|should|always|never)\b/,
+    ];
+
+    return patterns.some((pattern) => pattern.test(lowerContent));
+  }
+
+  private applyUserLedScoreAdjustments(score: number, breakdown: ConversationBreakdown, hasExplicit: boolean): number {
+    let adjustedScore = score;
+
+    if (!hasExplicit && !this.hasDurableUserSignal(breakdown.userContent)) {
+      adjustedScore = Math.min(adjustedScore, 3);
+    }
+
+    if (!hasExplicit && breakdown.userShare < 0.4) {
+      adjustedScore = Math.min(adjustedScore, 2);
+    }
+
+    if (!hasExplicit && breakdown.assistantLength > breakdown.userLength * 1.5) {
+      adjustedScore = Math.min(adjustedScore, 2);
+    }
+
+    return Math.max(0, Math.min(adjustedScore, 10));
   }
 
   /**
@@ -504,8 +590,7 @@ export class MemoryScorer {
    * Falls back to heuristic scoring on any failure.
    */
   private async scoreWithLocalModel(
-    fullContent: string,
-    segments: ConversationSegment[],
+    breakdown: ConversationBreakdown,
     modelCfg: ScoringModelConfig
   ): Promise<ScoringResult> {
     const endpoint = modelCfg.endpoint || 'http://localhost:8080';
@@ -517,17 +602,28 @@ export class MemoryScorer {
       'Return ONLY a JSON object (no markdown, no explanation outside the JSON) with these exact fields:',
       '  { "score": <number 0-10>, "tier": "explicit" | "silent" | "ephemeral", "reasoning": "<short string>" }',
       '',
-      'Scoring guidelines:',
-      `  - score >= ${this.config.explicitThreshold} → tier "explicit" (user preferences, critical facts, explicit requests to remember)`,
-      `  - score >= ${this.config.ephemeralThreshold} and < ${this.config.explicitThreshold} → tier "silent" (moderately useful information)`,
-      `  - score < ${this.config.ephemeralThreshold} → tier "ephemeral" (greetings, trivial chatter, low-value)`,
+      'Scoring rules:',
+      '  - Weight USER messages heavily. Weight ASSISTANT messages lightly unless they contain a concrete decision, plan, or durable summary initiated by the user.',
+      '  - Only score high when the USER initiated the topic and the content contains durable information such as preferences, explicit requests to remember, decisions, tasks, deadlines, plans, or important facts.',
+      '  - ASSISTANT acknowledgements, filler, confirmations, enthusiasm, or generic helpful replies are low-value and should not raise the score.',
+      '  - Internal reasoning, hidden chain-of-thought, and think blocks are never memory-worthy.',
+      `  - score >= ${this.config.explicitThreshold} → tier "explicit" only for explicit requests to remember, critical user preferences, or durable facts the assistant must retain long-term`,
+      `  - score >= ${this.config.ephemeralThreshold} and < ${this.config.explicitThreshold} → tier "silent" only for meaningful user-led context that may help later but is not critical`,
+      `  - score < ${this.config.ephemeralThreshold} → tier "ephemeral" for chatter, greetings, assistant-led content, or low-value exchanges`,
+      '  - If the conversation is mostly assistant response text or generic assistance, keep the score between 0 and 2.',
     ].join('\n');
 
-    const conversationText = segments
+    const conversationText = [...breakdown.userSegments, ...breakdown.assistantSegments]
       .map(s => `${s.role}: ${s.content}`)
       .join('\n');
 
-    const userPrompt = `Score this conversation:\n\n${conversationText}`;
+    const userPrompt = [
+      'Score this conversation using the rules above.',
+      `User content share: ${Math.round(breakdown.userShare * 100)}%`,
+      `User durable-signal heuristic: ${this.hasDurableUserSignal(breakdown.userContent) ? 'yes' : 'no'}`,
+      '',
+      conversationText,
+    ].join('\n');
 
     // Both llama.cpp server and OpenAI expose /v1/chat/completions
     const url = `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
@@ -572,18 +668,17 @@ export class MemoryScorer {
       const parsed = JSON.parse(cleaned);
 
       const rawScore = Math.max(0, Math.min(10, Math.round(Number(parsed.score) || 5)));
-      const tier = this.determineTier(rawScore);
-      const expiresInHours = tier === 'ephemeral' ? this.config.defaultEphemeralHours :
-                             tier === 'silent' ? this.config.defaultSilentDays * 24 : undefined;
 
-      const hasExplicit = this.detectExplicitMarkers(fullContent);
+      const hasExplicit = this.detectExplicitMarkers(breakdown.userContent);
+      const adjustedScore = this.applyUserLedScoreAdjustments(rawScore, breakdown, hasExplicit);
+      const adjustedTier = this.determineTier(adjustedScore);
 
       return {
-        score: rawScore,
-        tier,
+        score: adjustedScore,
+        tier: adjustedTier,
         reasoning: `[LLM] ${parsed.reasoning || 'No reasoning provided'}`,
-        expiresInHours,
-        recommendedAction: this.determineAction(tier, hasExplicit),
+        expiresInHours: adjustedTier === 'ephemeral' ? this.config.defaultEphemeralHours : adjustedTier === 'silent' ? this.config.defaultSilentDays * 24 : undefined,
+        recommendedAction: this.determineAction(adjustedTier, hasExplicit),
       };
     } finally {
       clearTimeout(timer);

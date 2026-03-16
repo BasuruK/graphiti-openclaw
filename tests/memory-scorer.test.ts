@@ -66,6 +66,36 @@ describe('MemoryScorer', () => {
     })).toThrow(/must be less than explicitThreshold/);
   });
 
+  it('keeps assistant-led low-value conversations at very low scores', async () => {
+    const adapter = createAdapter();
+    const scorer = new MemoryScorer(adapter, {
+      minConversationLength: 1,
+    });
+
+    const result = await scorer.scoreConversation([
+      { role: 'user', content: 'Can you help?' },
+      { role: 'assistant', content: 'Great! Absolutely. I can help with that. Here is a generic summary of options and next steps for you.' },
+    ]);
+
+    expect(result.score).toBeLessThanOrEqual(2);
+    expect(result.tier).toBe('ephemeral');
+  });
+
+  it('scores durable user-led preferences above trivial chatter', async () => {
+    const adapter = createAdapter();
+    const scorer = new MemoryScorer(adapter, {
+      minConversationLength: 1,
+    });
+
+    const result = await scorer.scoreConversation([
+      { role: 'user', content: 'Please remember that I prefer Vim keybindings and we decided to use pnpm for this repo.' },
+      { role: 'assistant', content: 'I will use that preference and repo decision in future help.' },
+    ]);
+
+    expect(result.score).toBeGreaterThanOrEqual(4);
+    expect(result.tier === 'silent' || result.tier === 'explicit').toBe(true);
+  });
+
   it('upgrades reinforced ephemeral memories during reinforcement processing', async () => {
     const ephemeralMemory: MemoryResult = {
       id: 'mem-1',

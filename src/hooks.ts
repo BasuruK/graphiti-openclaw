@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import { createMemoryScorer, DEFAULT_SCORING_CONFIG, type ScoringConfig, type ScoringResult, type ScoringModelConfig } from './memory-scorer.js';
+import { createMemoryScorer, DEFAULT_SCORING_CONFIG, type ConversationSegment, type ScoringConfig, type ScoringResult, type ScoringModelConfig } from './memory-scorer.js';
 import { getLogger } from './logger.js';
 
 const logger = getLogger('hooks');
@@ -21,6 +21,67 @@ const __dirname = path.dirname(__filename);
 const MIN_MESSAGE_LENGTH = 20;
 /** Maximum messages to capture per turn */
 const MAX_CAPTURE_MESSAGES = 15;
+
+const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>/gi;
+const XML_TAG_RE = /<[^>]+>/g;
+const ASSISTANT_FILLER_PATTERNS = [
+  /^(great|awesome|sure|absolutely|definitely|certainly|okay|ok|got it|understood|sounds good|no problem|of course|happy to help|glad to help|let me help|i can help)([!.\s,].*)?$/i,
+  /^(thanks|thank you|you're welcome|you are welcome)([!.\s,].*)?$/i,
+  /^(here'?s|here are|i'll|i will|let's|lets)\b/i,
+];
+
+function sanitizeMessageText(text: string): string {
+  return text
+    .replace(THINK_BLOCK_RE, ' ')
+    .replace(XML_TAG_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isAssistantFillerResponse(text: string): boolean {
+  if (!text) return true;
+  if (text.length > 180) return false;
+  return ASSISTANT_FILLER_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function extractConversationSegments(messages: any[]): ConversationSegment[] {
+  const conversationSegments: ConversationSegment[] = [];
+  const startIdx = Math.max(0, messages.length - MAX_CAPTURE_MESSAGES);
+
+  for (let i = startIdx; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== 'object') continue;
+
+    const msgObj = msg as Record<string, any>;
+    const role = msgObj.role;
+    if (role !== 'user' && role !== 'assistant') continue;
+
+    let text = '';
+    const content = msgObj.content;
+    if (typeof content === 'string') {
+      text = content;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === 'object' && 'type' in block && block.type === 'text') {
+          text += ` ${block.text || ''}`;
+        }
+      }
+    }
+
+    const sanitized = sanitizeMessageText(text);
+
+    if (!sanitized || sanitized.length < MIN_MESSAGE_LENGTH) continue;
+    if (sanitized.includes('Relevant memories:') || sanitized.includes('system_memory_instructions')) continue;
+    if (role === 'assistant' && isAssistantFillerResponse(sanitized)) continue;
+
+    conversationSegments.push({
+      content: sanitized.slice(0, 500),
+      role,
+    });
+  }
+
+  return conversationSegments;
+}
 
 /** Module-level timestamp for throttling heartbeat maintenance */
 let lastMaintenanceAt = 0;
@@ -120,9 +181,11 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
       const memoryInstructions = getCachedMemoryInstructions();
 
-      // Inject context via prependContext (always include instructions)
+      // Keep recall context in user-visible prepended context, but keep classification
+      // instructions in system-only context so they do not appear in chat history.
       return {
-        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>\n\n<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`
+        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>`,
+        prependSystemContext: `<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`
       };
     } catch (err) {
       logger.error(`Auto-recall error: ${err instanceof Error ? err.message : String(err)}`);
@@ -138,44 +201,7 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     if (!messages || !Array.isArray(messages) || messages.length === 0) return;
 
     try {
-      // Extract conversation from messages (chronological order, take last N)
-      const conversationSegments: { content: string; role: 'user' | 'assistant' }[] = [];
-
-      // Iterate messages in chronological order (oldest→newest)
-      // Start from the end to respect MAX_CAPTURE_MESSAGES limit
-      const startIdx = Math.max(0, messages.length - MAX_CAPTURE_MESSAGES);
-
-      for (let i = startIdx; i < messages.length; i++) {
-        const msg = messages[i];
-        if (!msg || typeof msg !== 'object') continue;
-
-        const msgObj = msg as Record<string, any>;
-        const role = msgObj.role;
-
-        if (role !== 'user' && role !== 'assistant') continue;
-
-        // Extract text content
-        let text = '';
-        const content = msgObj.content;
-        if (typeof content === 'string') {
-          text = content;
-        } else if (Array.isArray(content)) {
-          for (const block of content) {
-            if (block && typeof block === 'object' && 'type' in block && block.type === 'text') {
-              text += ' ' + (block.text || '');
-            }
-          }
-        }
-
-        // Skip short messages and injected context
-        if (!text || text.length < MIN_MESSAGE_LENGTH) continue;
-        if (text.includes('<memory>') || text.includes('<relevant-memories>')) continue;
-
-        conversationSegments.push({
-          content: text.slice(0, 500),
-          role: role as 'user' | 'assistant'
-        });
-      }
+      const conversationSegments = extractConversationSegments(messages);
 
       if (conversationSegments.length === 0) {
         logger.debug('Auto-capture found no meaningful messages to capture.');
