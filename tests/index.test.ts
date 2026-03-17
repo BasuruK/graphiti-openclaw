@@ -12,6 +12,8 @@ describe('resolvePluginConfig', () => {
     expect(config.autoCapture).toBe(true);
     expect(config.autoRecall).toBe(true);
     expect(config.scoringEnabled).toBe(true);
+    expect(config.axonEnabled).toBe(true);
+    expect(config.axonLookbackHours).toBe(24);
   });
 
   it('preserves explicit user overrides', () => {
@@ -22,6 +24,7 @@ describe('resolvePluginConfig', () => {
       endpoint: 'http://localhost:8000/sse',
       transport: 'sse',
       logLevel: 'debug',
+      axonDryRun: true,
     });
 
     expect(config.autoCapture).toBe(false);
@@ -30,6 +33,7 @@ describe('resolvePluginConfig', () => {
     expect(config.endpoint).toBe('http://localhost:8000/sse');
     expect(config.transport).toBe('sse');
     expect(config.logLevel).toBe('debug');
+    expect(config.axonDryRun).toBe(true);
   });
 
   it('normalizes enum, boolean, and numeric overrides before runtime use', () => {
@@ -46,6 +50,9 @@ describe('resolvePluginConfig', () => {
       scoringExplicitThreshold: '9',
       scoringEphemeralThreshold: '-2',
       axonDispatchEnabled: 'yes',
+      axonEnabled: '0',
+      axonLookbackHours: '0',
+      axonBatchLimit: '3',
     });
 
     expect(config.backend).toBe('graphiti-mcp');
@@ -60,5 +67,8 @@ describe('resolvePluginConfig', () => {
     expect(config.scoringExplicitThreshold).toBe(9);
     expect(config.scoringEphemeralThreshold).toBe(0);
     expect(config.axonDispatchEnabled).toBe(true);
+    expect(config.axonEnabled).toBe(false);
+    expect(config.axonLookbackHours).toBe(1);
+    expect(config.axonBatchLimit).toBe(3);
   });
 });

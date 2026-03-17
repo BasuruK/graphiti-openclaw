@@ -183,6 +183,56 @@
         "type": "boolean",
         "default": false,
         "description": "Opt in to heartbeat-based Axon dispatch when the host exposes a supported dispatchAxonTrigger hook."
+      },
+      "axonEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable Axon daily-memory hygiene tools and policy defaults. Scheduling still belongs in OpenClaw cron."
+      },
+      "axonSessionLogDir": {
+        "type": "string",
+        "default": "",
+        "description": "Optional directory containing OpenClaw daily Markdown session logs for Axon review. Empty means graph-only mode."
+      },
+      "axonLookbackHours": {
+        "type": "number",
+        "default": 24,
+        "minimum": 1,
+        "maximum": 168,
+        "description": "Default Axon lookback window in hours when gathering daily sources."
+      },
+      "axonEphemeralForgetDays": {
+        "type": "number",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 365,
+        "description": "Days after which stale ephemeral memories become prune candidates for Axon."
+      },
+      "axonSilentDecayDays": {
+        "type": "number",
+        "default": 30,
+        "minimum": 1,
+        "maximum": 365,
+        "description": "Days after which silent memories should be reviewed for decay or reconsolidation."
+      },
+      "axonBatchLimit": {
+        "type": "number",
+        "default": 20,
+        "minimum": 1,
+        "maximum": 100,
+        "description": "Maximum items Axon should gather per source group in one run."
+      },
+      "axonMinRepeatCount": {
+        "type": "number",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 20,
+        "description": "Minimum reinforcement count that keeps an ephemeral memory from being considered stale."
+      },
+      "axonDryRun": {
+        "type": "boolean",
+        "default": false,
+        "description": "When true, memory_axon_apply_plan reports intended actions without mutating the graph."
       }
     }
   },

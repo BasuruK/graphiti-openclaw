@@ -5,8 +5,7 @@
  * determining whether memories should be stored as Explicit, Silent, or Ephemeral.
  */
 
-import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import type { MemoryResult } from './adapters/memory-adapter.js';
+import type { MemoryAdapter, MemoryDisposition, MemoryKind, MemoryResult } from './adapters/memory-adapter.js';
 import { getLogger } from './logger.js';
 
 const logger = getLogger('scorer');
@@ -70,6 +69,9 @@ export interface ScoringResult {
   tier: 'explicit' | 'silent' | 'ephemeral';
   reasoning: string;
   expiresInHours?: number;
+  disposition: MemoryDisposition;
+  memoryKind: MemoryKind;
+  summary: string;
   recommendedAction: 'store_explicit' | 'store_silent' | 'store_ephemeral' | 'skip';
 }
 
@@ -166,6 +168,8 @@ export class MemoryScorer {
    */
   async scoreConversation(segments: ConversationSegment[]): Promise<ScoringResult> {
     const breakdown = this.buildConversationBreakdown(segments);
+    const memoryKind = this.classifyMemoryKind(breakdown.userContent);
+    const summary = this.buildMemorySummary(breakdown.userContent, memoryKind);
 
     // ── Disabled fast-path ──────────────────────────────────────────────
     if (!this.config.enabled) {
@@ -175,6 +179,9 @@ export class MemoryScorer {
         score: tier === 'explicit' ? 9 : tier === 'silent' ? 6 : 3,
         tier,
         reasoning: `Scoring disabled - defaulting to ${tier}`,
+        disposition: tier,
+        memoryKind,
+        summary,
         recommendedAction: actionMap[tier]
       };
     }
@@ -185,6 +192,9 @@ export class MemoryScorer {
         score: 1,
         tier: 'ephemeral',
         reasoning: 'No user-led content detected – skipping storage',
+        disposition: 'skip',
+        memoryKind,
+        summary,
         recommendedAction: 'skip'
       };
     }
@@ -199,6 +209,9 @@ export class MemoryScorer {
           score: 2,
           tier: 'ephemeral',
           reasoning: 'Conversation too short/trivial – skipping storage',
+          disposition: 'skip',
+          memoryKind,
+          summary,
           recommendedAction: 'skip'
         };
       }
@@ -209,11 +222,12 @@ export class MemoryScorer {
         score: 1,
         tier: 'ephemeral',
         reasoning: 'Conversation is mostly assistant response content – skipping storage',
+        disposition: 'skip',
+        memoryKind,
+        summary,
         recommendedAction: 'skip'
       };
     }
-
-    const fullContent = breakdown.fullContent;
 
     // ── Local model scoring (llama.cpp / OpenAI-compatible) ─────────────
     const modelCfg = this.config.scoringModel;
@@ -228,6 +242,7 @@ export class MemoryScorer {
 
     // ── Heuristic scoring (single recall call) ──────────────────────────
     const hasExplicit = this.detectExplicitMarkers(breakdown.userContent);
+    const hasWorkingContext = this.detectWorkingContextSignal(breakdown.userContent);
     const emotionalWeight = this.detectEmotionalContent(breakdown.userContent);
     const timeSensitivity = this.detectTimeSensitivity(breakdown.userContent);
     const futureUtility = await this.predictFutureUtility(breakdown.userContent, breakdown.userSegments);
@@ -257,20 +272,21 @@ export class MemoryScorer {
       novelty: novelty
     });
 
-    score = this.applyUserLedScoreAdjustments(score, breakdown, hasExplicit);
+    score = this.applyUserLedScoreAdjustments(score, breakdown, hasExplicit, memoryKind, hasWorkingContext);
 
     // Determine tier based on thresholds
     const tier = this.determineTier(score);
-    const expiresInHours = tier === 'ephemeral' ? this.config.defaultEphemeralHours :
-                           tier === 'silent' ? this.config.defaultSilentDays * 24 : undefined;
-
-    const recommendedAction = this.determineAction(tier, hasExplicit);
+    const disposition = this.determineDisposition(score, tier, breakdown, hasExplicit, memoryKind);
+    const storageTier = disposition === 'skip' ? tier : disposition;
+    const recommendedAction = this.determineAction(disposition);
 
     return {
       score,
       tier,
       reasoning: this.generateReasoning(score, tier, {
         hasExplicit,
+        hasWorkingContext,
+        memoryKind,
         emotionalWeight,
         repetitionScore,
         contextAnchoring,
@@ -278,7 +294,13 @@ export class MemoryScorer {
         novelty,
         futureUtility
       }),
-      expiresInHours,
+      expiresInHours: disposition === 'skip' ? undefined : (
+        storageTier === 'ephemeral' ? this.config.defaultEphemeralHours :
+        storageTier === 'silent' ? this.config.defaultSilentDays * 24 : undefined
+      ),
+      disposition,
+      memoryKind,
+      summary,
       recommendedAction
     };
   }
@@ -308,6 +330,67 @@ export class MemoryScorer {
     };
   }
 
+  private classifyMemoryKind(content: string): MemoryKind {
+    const lowerContent = content.toLowerCase().trim();
+
+    if (!lowerContent) {
+      return 'other';
+    }
+
+    if (/\b(i prefer|i like|i dislike|i love|i hate|my preference|default to|prefer using)\b/.test(lowerContent)) {
+      return 'preference';
+    }
+
+    if (/\b(we decided|decision|decided to|agreed to|final choice|settled on)\b/.test(lowerContent)) {
+      return 'decision';
+    }
+
+    if (/\b(todo|task|deadline|due|next step|follow up|ship|release|remind me|must|need to)\b/.test(lowerContent)) {
+      return 'task';
+    }
+
+    if (this.detectWorkingContextSignal(lowerContent)) {
+      return 'working_context';
+    }
+
+    if (/\b(insight|pattern|synthesis|summary)\b/.test(lowerContent)) {
+      return 'insight';
+    }
+
+    if (/\?$/.test(lowerContent) || /^(how|what|why|where|when|can|could|would|should)\b/.test(lowerContent)) {
+      return 'question';
+    }
+
+    return 'fact';
+  }
+
+  private buildMemorySummary(content: string, memoryKind: MemoryKind): string {
+    const cleaned = content
+      .replace(/\bplease remember that\b/gi, '')
+      .replace(/\bremember that\b/gi, '')
+      .replace(/\bplease remember\b/gi, '')
+      .replace(/\bkeep in mind that\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const firstSentence = cleaned.split(/(?<=[.!?])\s+/)[0] || cleaned;
+    const trimmed = firstSentence.length > 220 ? `${firstSentence.slice(0, 217)}...` : firstSentence;
+
+    const prefixByKind: Record<MemoryKind, string> = {
+      preference: 'Preference',
+      decision: 'Decision',
+      task: 'Task',
+      fact: 'Fact',
+      working_context: 'Working context',
+      question: 'Question',
+      summary: 'Summary',
+      insight: 'Insight',
+      other: 'Memory',
+    };
+
+    return `${prefixByKind[memoryKind]}: ${trimmed}`;
+  }
+
   private hasDurableUserSignal(content: string): boolean {
     const lowerContent = content.toLowerCase();
     const patterns = [
@@ -320,11 +403,51 @@ export class MemoryScorer {
     return patterns.some((pattern) => pattern.test(lowerContent));
   }
 
-  private applyUserLedScoreAdjustments(score: number, breakdown: ConversationBreakdown, hasExplicit: boolean): number {
-    let adjustedScore = score;
+  private detectWorkingContextSignal(content: string): boolean {
+    const lowerContent = content.toLowerCase();
+    const patterns = [
+      /\b(currently|right now|for now|this session|today|temporary|temporarily)\b/,
+      /\b(working on|debugging|blocked on|current blocker|unblock|in progress)\b/,
+      /\b(build is failing|tests are failing|deployment failed|release blocker|ci is failing)\b/,
+      /\b(this repo|this branch|this task|this bug|this ticket|this pr)\b/,
+    ];
 
-    if (!hasExplicit && !this.hasDurableUserSignal(breakdown.userContent)) {
+    return patterns.some((pattern) => pattern.test(lowerContent));
+  }
+
+  private isLowValueQuery(content: string, hasWorkingContext: boolean): boolean {
+    if (hasWorkingContext || this.hasDurableUserSignal(content) || this.detectExplicitMarkers(content)) {
+      return false;
+    }
+
+    const lowerContent = content.toLowerCase().trim();
+    const questionWord = /^(how|what|why|where|when|can|could|would|should|do|does|is|are)\b/.test(lowerContent);
+    const supportTopic = /\b(openclaw|config|setting|mode|flag|option|install|setup|set up|enable|disable|command)\b/.test(lowerContent);
+    const shortQuestion = lowerContent.endsWith('?') || lowerContent.split(/\s+/).length <= 18;
+
+    return (questionWord || lowerContent.includes('help me')) && supportTopic && shortQuestion;
+  }
+
+  private applyUserLedScoreAdjustments(
+    score: number,
+    breakdown: ConversationBreakdown,
+    hasExplicit: boolean,
+    memoryKind: MemoryKind,
+    hasWorkingContext: boolean
+  ): number {
+    let adjustedScore = score;
+    const lowValueQuery = this.isLowValueQuery(breakdown.userContent, hasWorkingContext);
+
+    if (!hasExplicit && !this.hasDurableUserSignal(breakdown.userContent) && !hasWorkingContext) {
       adjustedScore = Math.min(adjustedScore, 3);
+    }
+
+    if (!hasExplicit && lowValueQuery) {
+      adjustedScore = Math.min(adjustedScore, 2);
+    }
+
+    if (!hasExplicit && memoryKind === 'question' && !hasWorkingContext) {
+      adjustedScore = Math.min(adjustedScore, 2);
     }
 
     if (!hasExplicit && breakdown.userShare < 0.4) {
@@ -335,7 +458,48 @@ export class MemoryScorer {
       adjustedScore = Math.min(adjustedScore, 2);
     }
 
+    if (hasWorkingContext) {
+      adjustedScore = Math.max(adjustedScore, Math.max(1, this.config.ephemeralThreshold - 1));
+    }
+
     return Math.max(0, Math.min(adjustedScore, 10));
+  }
+
+  private determineDisposition(
+    score: number,
+    tier: 'explicit' | 'silent' | 'ephemeral',
+    breakdown: ConversationBreakdown,
+    hasExplicit: boolean,
+    memoryKind: MemoryKind,
+    preferredDisposition?: MemoryDisposition
+  ): MemoryDisposition {
+    const hasWorkingContext = this.detectWorkingContextSignal(breakdown.userContent);
+
+    if (preferredDisposition === 'skip') {
+      return 'skip';
+    }
+
+    if (!hasExplicit && this.isLowValueQuery(breakdown.userContent, hasWorkingContext)) {
+      return 'skip';
+    }
+
+    if (!hasExplicit && memoryKind === 'question' && !hasWorkingContext) {
+      return 'skip';
+    }
+
+    if (preferredDisposition) {
+      return preferredDisposition;
+    }
+
+    if (hasExplicit && this.hasDurableUserSignal(breakdown.userContent)) {
+      return 'explicit';
+    }
+
+    if (tier === 'ephemeral') {
+      return hasWorkingContext ? 'ephemeral' : 'skip';
+    }
+
+    return tier;
   }
 
   /**
@@ -579,9 +743,10 @@ export class MemoryScorer {
   /**
    * Determine recommended action based on tier
    */
-  private determineAction(tier: 'explicit' | 'silent' | 'ephemeral', hasExplicit: boolean): ScoringResult['recommendedAction'] {
-    if (tier === 'explicit' || hasExplicit) return 'store_explicit';
-    if (tier === 'silent') return 'store_silent';
+  private determineAction(disposition: MemoryDisposition): ScoringResult['recommendedAction'] {
+    if (disposition === 'skip') return 'skip';
+    if (disposition === 'explicit') return 'store_explicit';
+    if (disposition === 'silent') return 'store_silent';
     return 'store_ephemeral';
   }
 
@@ -604,13 +769,15 @@ export class MemoryScorer {
     const systemPrompt = [
       'You are a memory importance scorer. Analyze the conversation and decide how important it is to remember long-term.',
       'Return ONLY a JSON object (no markdown, no explanation outside the JSON) with these exact fields:',
-      '  { "score": <number 0-10>, "tier": "explicit" | "silent" | "ephemeral", "reasoning": "<short string>" }',
+      '  { "score": <number 0-10>, "tier": "explicit" | "silent" | "ephemeral", "disposition": "skip" | "explicit" | "silent" | "ephemeral", "memoryKind": "<string>", "summary": "<short string>", "reasoning": "<short string>" }',
       '',
       'Scoring rules:',
       '  - Weight USER messages heavily. Weight ASSISTANT messages lightly unless they contain a concrete decision, plan, or durable summary initiated by the user.',
       '  - Only score high when the USER initiated the topic and the content contains durable information such as preferences, explicit requests to remember, decisions, tasks, deadlines, plans, or important facts.',
       '  - ASSISTANT acknowledgements, filler, confirmations, enthusiasm, or generic helpful replies are low-value and should not raise the score.',
       '  - Internal reasoning, hidden chain-of-thought, and think blocks are never memory-worthy.',
+      '  - Generic help, setup, or one-off how-to questions should usually score 0-2 and disposition "skip".',
+      '  - Use disposition "ephemeral" only for short-lived but task-relevant working context.',
       `  - score >= ${this.config.explicitThreshold} → tier "explicit" only for explicit requests to remember, critical user preferences, or durable facts the assistant must retain long-term`,
       `  - score >= ${this.config.ephemeralThreshold} and < ${this.config.explicitThreshold} → tier "silent" only for meaningful user-led context that may help later but is not critical`,
       `  - score < ${this.config.ephemeralThreshold} → tier "ephemeral" for chatter, greetings, assistant-led content, or low-value exchanges`,
@@ -674,15 +841,48 @@ export class MemoryScorer {
       const rawScore = Math.max(0, Math.min(10, Math.round(Number(parsed.score) || 5)));
 
       const hasExplicit = this.detectExplicitMarkers(breakdown.userContent);
-      const adjustedScore = this.applyUserLedScoreAdjustments(rawScore, breakdown, hasExplicit);
+      const rawMemoryKind = typeof parsed.memoryKind === 'string'
+        ? String(parsed.memoryKind).trim().toLowerCase()
+        : '';
+      const allowedKinds: MemoryKind[] = ['preference', 'decision', 'task', 'fact', 'working_context', 'question', 'summary', 'insight', 'other'];
+      const memoryKind = allowedKinds.includes(rawMemoryKind as MemoryKind)
+        ? rawMemoryKind as MemoryKind
+        : this.classifyMemoryKind(breakdown.userContent);
+      const summary = typeof parsed.summary === 'string' && parsed.summary.trim().length > 0
+        ? parsed.summary.trim()
+        : this.buildMemorySummary(breakdown.userContent, memoryKind);
+      const adjustedScore = this.applyUserLedScoreAdjustments(
+        rawScore,
+        breakdown,
+        hasExplicit,
+        memoryKind,
+        this.detectWorkingContextSignal(breakdown.userContent)
+      );
       const adjustedTier = this.determineTier(adjustedScore);
+      const disposition = this.determineDisposition(
+        adjustedScore,
+        adjustedTier,
+        breakdown,
+        hasExplicit,
+        memoryKind,
+        parsed.disposition as MemoryDisposition | undefined
+      );
 
       return {
         score: adjustedScore,
         tier: adjustedTier,
         reasoning: `[LLM] ${parsed.reasoning || 'No reasoning provided'}`,
-        expiresInHours: adjustedTier === 'ephemeral' ? this.config.defaultEphemeralHours : adjustedTier === 'silent' ? this.config.defaultSilentDays * 24 : undefined,
-        recommendedAction: this.determineAction(adjustedTier, hasExplicit),
+        expiresInHours: disposition === 'skip'
+          ? undefined
+          : adjustedTier === 'ephemeral'
+            ? this.config.defaultEphemeralHours
+            : adjustedTier === 'silent'
+              ? this.config.defaultSilentDays * 24
+              : undefined,
+        disposition,
+        memoryKind,
+        summary,
+        recommendedAction: this.determineAction(disposition),
       };
     } finally {
       clearTimeout(timer);
@@ -697,6 +897,8 @@ export class MemoryScorer {
     tier: string,
     factors: {
       hasExplicit: boolean;
+      hasWorkingContext: boolean;
+      memoryKind: MemoryKind;
       emotionalWeight: number;
       repetitionScore: number;
       contextAnchoring: number;
@@ -708,6 +910,8 @@ export class MemoryScorer {
     const reasons: string[] = [];
 
     if (factors.hasExplicit) reasons.push('user explicitly asked to remember');
+    if (factors.hasWorkingContext) reasons.push('task-relevant working context detected');
+    if (factors.memoryKind === 'question') reasons.push('generic question content is low durability');
     if (factors.emotionalWeight > 3) reasons.push('emotional/preference content detected');
     if (factors.repetitionScore > 5) reasons.push('repeated information');
     if (factors.repetitionScore < 3) reasons.push('new, unique information');

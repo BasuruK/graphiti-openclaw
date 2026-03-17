@@ -7,6 +7,25 @@
 
 import type { Readable } from 'stream';
 
+export type MemoryDisposition = 'skip' | 'explicit' | 'silent' | 'ephemeral';
+
+export type MemoryKind =
+  | 'preference'
+  | 'decision'
+  | 'task'
+  | 'fact'
+  | 'working_context'
+  | 'question'
+  | 'summary'
+  | 'insight'
+  | 'other';
+
+export interface SourceLogReference {
+  path: string;
+  date?: string;
+  excerpt?: string;
+}
+
 /**
  * Memory metadata stored with each memory
  */
@@ -33,6 +52,14 @@ export interface MemoryMetadata {
   downgradedFrom?: number;
   /** Has this memory been consolidated by Axon? */
   consolidated?: boolean;
+  /** Distilled capture summary */
+  summary?: string;
+  /** High-level classification of the memory */
+  memoryKind?: MemoryKind;
+  /** Capture outcome that led to storage */
+  disposition?: Exclude<MemoryDisposition, 'skip'>;
+  /** Optional source log reference used by Axon */
+  sourceLog?: SourceLogReference;
 }
 
 /**
@@ -200,6 +227,11 @@ export interface MemoryAdapter {
   list(limit?: number, tier?: 'explicit' | 'silent' | 'ephemeral' | 'all'): Promise<MemoryResult[]>;
 
   /**
+   * Get a specific stored memory by ID if available
+   */
+  getById(id: string): Promise<MemoryResult | null>;
+
+  /**
    * Search by specific entity name
    */
   searchByEntity(entityName: string, limit?: number): Promise<MemoryResult[]>;
@@ -250,6 +282,11 @@ export interface MemoryAdapter {
     insight: string,
     connections: { fromId: string; toId: string; relationship: string }[]
   ): Promise<void>;
+
+  /**
+   * Create a direct semantic relationship between two stored memories.
+   */
+  connect(fromId: string, toId: string, relationship: string): Promise<void>;
 
   /**
    * Get backend type identifier

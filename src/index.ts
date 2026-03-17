@@ -19,7 +19,7 @@
 
 import { registerTools } from './tools.js';
 import { registerHooks } from './hooks.js';
-import { adapterFactory, createAdapterFromConfig } from './adapters/factory.js';
+import { adapterFactory } from './adapters/factory.js';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import type { BackendConfig } from './adapters/memory-adapter.js';
 import { configureLogger, getLogger, type LogLevel } from './logger.js';
@@ -50,6 +50,14 @@ type ResolvedPluginConfig = Record<string, unknown> & {
   scoringMinMessageCount: number;
   scoringDefaultTier: 'explicit' | 'silent' | 'ephemeral';
   axonDispatchEnabled: boolean;
+  axonEnabled: boolean;
+  axonSessionLogDir: string;
+  axonLookbackHours: number;
+  axonEphemeralForgetDays: number;
+  axonSilentDecayDays: number;
+  axonBatchLimit: number;
+  axonMinRepeatCount: number;
+  axonDryRun: boolean;
 };
 
 /** Previous plugin IDs for migration compatibility */
@@ -91,6 +99,14 @@ const DEFAULT_PLUGIN_CONFIG: ResolvedPluginConfig = {
   scoringMinMessageCount: 1,
   scoringDefaultTier: 'silent',
   axonDispatchEnabled: false,
+  axonEnabled: true,
+  axonSessionLogDir: '',
+  axonLookbackHours: 24,
+  axonEphemeralForgetDays: 5,
+  axonSilentDecayDays: 30,
+  axonBatchLimit: 20,
+  axonMinRepeatCount: 2,
+  axonDryRun: false,
 };
 
 function registerProcessCleanup(handler: () => Promise<void>, bindProcessSignals = true): void {
@@ -223,9 +239,10 @@ function migratePluginSettings(api: any, currentId: string): void {
 }
 
 /**
- * Validate and coerce scoring config values from user input.
+ * Validate and coerce scoring/Axon config values from user input.
  * Enforces: ephemeralThreshold >= 0, explicitThreshold > ephemeralThreshold,
- * ephemeralHours >= 1, silentDays >= 1, cleanupHours >= 1.
+ * ephemeralHours >= 1, silentDays >= 1, cleanupHours >= 1,
+ * axon lookback/batch/repeat values >= 1.
  */
 function validateScoringConfig(config: Record<string, unknown>): void {
   const ephemeralThreshold = config.scoringEphemeralThreshold as number | undefined;
@@ -250,6 +267,26 @@ function validateScoringConfig(config: Record<string, unknown>): void {
   if (config.scoringCleanupHours != null && (config.scoringCleanupHours as number) < 1) {
     logger.warn('scoringCleanupHours must be >= 1, clamping to 1');
     config.scoringCleanupHours = 1;
+  }
+  if (config.axonLookbackHours != null && (config.axonLookbackHours as number) < 1) {
+    logger.warn('axonLookbackHours must be >= 1, clamping to 1');
+    config.axonLookbackHours = 1;
+  }
+  if (config.axonEphemeralForgetDays != null && (config.axonEphemeralForgetDays as number) < 1) {
+    logger.warn('axonEphemeralForgetDays must be >= 1, clamping to 1');
+    config.axonEphemeralForgetDays = 1;
+  }
+  if (config.axonSilentDecayDays != null && (config.axonSilentDecayDays as number) < 1) {
+    logger.warn('axonSilentDecayDays must be >= 1, clamping to 1');
+    config.axonSilentDecayDays = 1;
+  }
+  if (config.axonBatchLimit != null && (config.axonBatchLimit as number) < 1) {
+    logger.warn('axonBatchLimit must be >= 1, clamping to 1');
+    config.axonBatchLimit = 1;
+  }
+  if (config.axonMinRepeatCount != null && (config.axonMinRepeatCount as number) < 1) {
+    logger.warn('axonMinRepeatCount must be >= 1, clamping to 1');
+    config.axonMinRepeatCount = 1;
   }
 
   // Validate scoringModel.endpoint URL
@@ -301,6 +338,14 @@ export function resolvePluginConfig(rawConfig: Record<string, unknown>): Resolve
     scoringMinMessageCount: normalizeNumber(rawConfig.scoringMinMessageCount, DEFAULT_PLUGIN_CONFIG.scoringMinMessageCount, 1),
     scoringDefaultTier: normalizeEnum(rawConfig.scoringDefaultTier, ['explicit', 'silent', 'ephemeral'] as const, DEFAULT_PLUGIN_CONFIG.scoringDefaultTier),
     axonDispatchEnabled: normalizeBoolean(rawConfig.axonDispatchEnabled, DEFAULT_PLUGIN_CONFIG.axonDispatchEnabled),
+    axonEnabled: normalizeBoolean(rawConfig.axonEnabled, DEFAULT_PLUGIN_CONFIG.axonEnabled),
+    axonSessionLogDir: normalizeString(rawConfig.axonSessionLogDir, DEFAULT_PLUGIN_CONFIG.axonSessionLogDir),
+    axonLookbackHours: normalizeNumber(rawConfig.axonLookbackHours, DEFAULT_PLUGIN_CONFIG.axonLookbackHours, 1),
+    axonEphemeralForgetDays: normalizeNumber(rawConfig.axonEphemeralForgetDays, DEFAULT_PLUGIN_CONFIG.axonEphemeralForgetDays, 1),
+    axonSilentDecayDays: normalizeNumber(rawConfig.axonSilentDecayDays, DEFAULT_PLUGIN_CONFIG.axonSilentDecayDays, 1),
+    axonBatchLimit: normalizeNumber(rawConfig.axonBatchLimit, DEFAULT_PLUGIN_CONFIG.axonBatchLimit, 1),
+    axonMinRepeatCount: normalizeNumber(rawConfig.axonMinRepeatCount, DEFAULT_PLUGIN_CONFIG.axonMinRepeatCount, 1),
+    axonDryRun: normalizeBoolean(rawConfig.axonDryRun, DEFAULT_PLUGIN_CONFIG.axonDryRun),
   };
 
   return {
@@ -512,6 +557,56 @@ export default {
         type: 'boolean',
         default: false,
         description: 'Opt in to heartbeat-based Axon dispatch when the host exposes a supported dispatchAxonTrigger hook.'
+      },
+      axonEnabled: {
+        type: 'boolean',
+        default: true,
+        description: 'Enable Axon daily-memory hygiene tools and policy defaults. Scheduling still belongs in OpenClaw cron.'
+      },
+      axonSessionLogDir: {
+        type: 'string',
+        default: '',
+        description: 'Optional directory containing OpenClaw daily Markdown session logs for Axon review. Empty means graph-only mode.'
+      },
+      axonLookbackHours: {
+        type: 'number',
+        default: 24,
+        minimum: 1,
+        maximum: 168,
+        description: 'Default Axon lookback window in hours when gathering daily sources.'
+      },
+      axonEphemeralForgetDays: {
+        type: 'number',
+        default: 5,
+        minimum: 1,
+        maximum: 365,
+        description: 'Days after which stale ephemeral memories become prune candidates for Axon.'
+      },
+      axonSilentDecayDays: {
+        type: 'number',
+        default: 30,
+        minimum: 1,
+        maximum: 365,
+        description: 'Days after which silent memories should be reviewed for decay or reconsolidation.'
+      },
+      axonBatchLimit: {
+        type: 'number',
+        default: 20,
+        minimum: 1,
+        maximum: 100,
+        description: 'Maximum items Axon should gather per source group in one run.'
+      },
+      axonMinRepeatCount: {
+        type: 'number',
+        default: 2,
+        minimum: 1,
+        maximum: 20,
+        description: 'Minimum reinforcement count that keeps an ephemeral memory from being considered stale.'
+      },
+      axonDryRun: {
+        type: 'boolean',
+        default: false,
+        description: 'When true, memory_axon_apply_plan reports intended actions without mutating the graph.'
       }
     }
   },
@@ -535,7 +630,9 @@ export default {
       logLevel: config.logLevel,
       autoCapture: config.autoCapture,
       autoRecall: config.autoRecall,
-      scoringEnabled: config.scoringEnabled
+      scoringEnabled: config.scoringEnabled,
+      axonEnabled: config.axonEnabled,
+      axonSessionLogDir: config.axonSessionLogDir ? '[configured]' : '[none]'
     };
     logger.debug(`Registering plugin with config: ${JSON.stringify(safeConfig)}`);
 

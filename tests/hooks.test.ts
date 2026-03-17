@@ -12,6 +12,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     forget: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     list: vi.fn().mockResolvedValue([]),
+    getById: vi.fn().mockResolvedValue(null),
     searchByEntity: vi.fn().mockResolvedValue([]),
     searchByTimeRange: vi.fn().mockResolvedValue([]),
     getRelated: vi.fn().mockResolvedValue([]),
@@ -20,6 +21,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     cleanup: vi.fn().mockResolvedValue({ deleted: 0, upgraded: 0 }),
     getUnconsolidatedMemories: vi.fn().mockResolvedValue([]),
     storeConsolidation: vi.fn().mockResolvedValue(undefined),
+    connect: vi.fn().mockResolvedValue(undefined),
     getBackendType: vi.fn().mockReturnValue('test'),
     ...overrides,
   } as unknown as MemoryAdapter;
@@ -86,8 +88,11 @@ describe('registerHooks', () => {
 
     expect(adapter.store).toHaveBeenCalledTimes(1);
     expect(adapter.store).toHaveBeenCalledWith(
-      expect.stringContaining('user: Please remember that I prefer Vim keybindings'),
+      expect.stringContaining('Preference: I prefer Vim keybindings in VS Code for daily development work.'),
       expect.objectContaining({
+        tier: 'explicit',
+        disposition: 'explicit',
+        memoryKind: 'preference',
         source: 'auto_capture',
         sessionId: 'session-1',
       })
@@ -114,6 +119,33 @@ describe('registerHooks', () => {
       sessionId: 'session-2',
       messages: [
         { role: 'user', content: 'hello there nice to meet you today' },
+      ],
+    });
+
+    expect(adapter.store).not.toHaveBeenCalled();
+  });
+
+  it('skips one-off OpenClaw help questions during auto-capture', async () => {
+    const adapter = createAdapter({
+      recall: vi.fn().mockResolvedValue([]),
+      store: vi.fn().mockResolvedValue('memory-42'),
+    });
+    const api = createApi();
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: true,
+      minPromptLength: 1,
+      recallMaxFacts: 3,
+      scoringEnabled: true,
+    });
+
+    const agentEnd = api.handlers.get('agent_end')!;
+    await agentEnd({
+      sessionId: 'session-help',
+      messages: [
+        { role: 'user', content: 'How can I set thinking mode to high in OpenClaw?' },
+        { role: 'assistant', content: 'Open the config and switch the thinking mode option to high.' },
       ],
     });
 
@@ -188,7 +220,7 @@ describe('registerHooks', () => {
     );
   });
 
-  it('keeps substantive assistant summaries that begin with conversational openers', async () => {
+  it('stores distilled user-led summaries instead of raw assistant turn text', async () => {
     const adapter = createAdapter({
       recall: vi.fn().mockResolvedValue([]),
       store: vi.fn().mockResolvedValue('memory-42'),
@@ -215,7 +247,14 @@ describe('registerHooks', () => {
 
     expect(adapter.store).toHaveBeenCalledTimes(1);
     expect(adapter.store).toHaveBeenCalledWith(
-      expect.stringContaining("assistant: Here's the plan: use pnpm for installs and target Friday for the release cut."),
+      expect.stringContaining('Decision: we decided to use pnpm for this repo and ship on Friday.'),
+      expect.objectContaining({
+        memoryKind: 'decision',
+        tier: 'explicit',
+      })
+    );
+    expect(adapter.store).toHaveBeenCalledWith(
+      expect.not.stringContaining("Here's the plan: use pnpm for installs and target Friday for the release cut."),
       expect.anything()
     );
   });

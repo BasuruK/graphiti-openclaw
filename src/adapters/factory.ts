@@ -8,11 +8,9 @@ import {
   type MemoryAdapter,
   type BackendConfig,
   type GraphitiMCPConfig,
-  type FalkorDBConfig,
-  type SQLiteConfig,
 } from './memory-adapter.js';
 
-import { createGraphitiMCPAdapter, normalizeGraphitiMCPConfig } from './graphiti-adapter.js';
+import { createGraphitiMCPAdapter } from './graphiti-adapter.js';
 import { getLogger } from '../logger.js';
 
 const logger = getLogger('adapter-factory');

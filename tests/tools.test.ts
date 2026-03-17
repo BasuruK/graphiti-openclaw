@@ -12,6 +12,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     forget: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     list: vi.fn().mockResolvedValue([]),
+    getById: vi.fn().mockResolvedValue(null),
     searchByEntity: vi.fn().mockResolvedValue([]),
     searchByTimeRange: vi.fn().mockResolvedValue([]),
     getRelated: vi.fn().mockResolvedValue([]),
@@ -23,6 +24,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     cleanup: vi.fn().mockResolvedValue({ deleted: 0, upgraded: 0 }),
     getUnconsolidatedMemories: vi.fn().mockResolvedValue([]),
     storeConsolidation: vi.fn().mockResolvedValue(undefined),
+    connect: vi.fn().mockResolvedValue(undefined),
     getBackendType: vi.fn().mockReturnValue('test'),
     ...overrides,
   } as unknown as MemoryAdapter;
@@ -84,5 +86,50 @@ describe('registerTools', () => {
     expect(result.isError).toBeUndefined();
     expect(result.details.warning).toContain('no semantic connections');
     expect(adapter.storeConsolidation).toHaveBeenCalledWith(['mem-1'], 'Merged summary', 'Shared pattern', []);
+  });
+
+  it('falls back to graph-only mode with a warning when axonSessionLogDir cannot be read', async () => {
+    const adapter = createAdapter({
+      list: vi.fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]),
+    });
+    const api = createApi();
+
+    registerTools(api, adapter, {
+      axonEnabled: true,
+      axonSessionLogDir: '/definitely/missing/path',
+      axonLookbackHours: 24,
+      axonBatchLimit: 5,
+      axonEphemeralForgetDays: 5,
+      axonMinRepeatCount: 2,
+    });
+
+    const result = await api.tools.get('memory_axon_daily_sources').execute('tool-4', {});
+
+    expect(result.isError).toBeUndefined();
+    expect(result.details.warnings[0]).toContain('falling back to graph-only mode');
+  });
+
+  it('honors axonDryRun when applying Axon plans', async () => {
+    const adapter = createAdapter();
+    const api = createApi();
+
+    registerTools(api, adapter, {
+      axonEnabled: true,
+      axonDryRun: true,
+    });
+
+    const result = await api.tools.get('memory_axon_apply_plan').execute('tool-5', {
+      operations: [
+        { action: 'store', summary: 'Summary: keep this for tomorrow', tier: 'ephemeral' },
+        { action: 'connect', fromId: 'mem-1', toId: 'mem-2', relationship: 'RELATES_TO' },
+      ],
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.details.dryRun).toBe(true);
+    expect(adapter.store).not.toHaveBeenCalled();
+    expect(adapter.connect).not.toHaveBeenCalled();
   });
 });

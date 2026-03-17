@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import { createMemoryScorer, DEFAULT_SCORING_CONFIG, type ConversationSegment, type ScoringConfig, type ScoringResult, type ScoringModelConfig } from './memory-scorer.js';
 import { getLogger } from './logger.js';
+import { reinforceMemories } from './memory-maintenance.js';
 
 const logger = getLogger('hooks');
 
@@ -185,11 +186,15 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
         tier: 'all'
       });
 
+      void reinforceMemories(adapter, results).catch((err) => {
+        logger.debug(`Recall reinforcement skipped: ${err instanceof Error ? err.message : String(err)}`);
+      });
+
       // If no results, still return MEMORY.md instructions for the system prompt
       const contextBlock = results && results.length > 0
         ? results
             .slice(0, config.recallMaxFacts || 5)
-            .map((r, i) => `• ${r.summary || r.content.substring(0, 100)}`)
+            .map((r) => `• ${r.summary || r.content.substring(0, 100)}`)
             .join('\n')
         : 'No relevant memories found.';
 
@@ -227,16 +232,18 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       const sessionId = event.sessionId || 'unknown';
       const scoreResult = await scorer.scoreConversation(conversationSegments);
 
-      logger.debug(`Auto-capture scored conversation ${scoreResult.score}/10 (${scoreResult.tier}).`);
+      logger.debug(
+        `Auto-capture scored conversation ${scoreResult.score}/10 (${scoreResult.tier}, disposition=${scoreResult.disposition}, kind=${scoreResult.memoryKind}).`
+      );
 
-      if (scoreResult.recommendedAction === 'skip') {
+      if (scoreResult.disposition === 'skip' || scoreResult.recommendedAction === 'skip') {
         logger.debug('Auto-capture skipped low-importance conversation.');
         return;
       }
 
-      await storeWithMetadata(adapter, conversationSegments, sessionId, scoreResult);
+      await storeWithMetadata(adapter, sessionId, scoreResult);
 
-      if (scoreResult.tier === 'explicit' && scoringConfig.notifyOnExplicit) {
+      if (scoreResult.disposition === 'explicit' && scoringConfig.notifyOnExplicit) {
         logger.info('Auto-capture stored an explicit memory.');
       }
 
@@ -298,24 +305,27 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
 async function storeWithMetadata(
   adapter: MemoryAdapter,
-  segments: { content: string; role: 'user' | 'assistant' }[],
   sessionId: string,
   scoreResult: ScoringResult
 ): Promise<void> {
-  const conversation = segments
-    .map((segment) => `${segment.role}: ${segment.content}`)
-    .join('\n\n');
+  if (scoreResult.disposition === 'skip') {
+    return;
+  }
 
   const expiresAt = scoreResult.expiresInHours
     ? new Date(Date.now() + scoreResult.expiresInHours * 3600000)
     : undefined;
 
-  await adapter.store(conversation, {
-    tier: scoreResult.tier,
+  await adapter.store(scoreResult.summary, {
+    tier: scoreResult.disposition,
+    disposition: scoreResult.disposition,
     score: scoreResult.score,
     source: 'auto_capture',
     sessionId,
     expiresAt,
+    summary: scoreResult.summary,
+    memoryKind: scoreResult.memoryKind,
+    tags: ['auto_capture', scoreResult.memoryKind],
   });
 }
 
@@ -323,7 +333,7 @@ async function storeWithMetadata(
  * Helper to dispatch the Axon consolidation trigger via an explicitly provided host hook.
  */
 async function dispatchAxonTrigger(api: any, config: any): Promise<boolean> {
-  if (config.axonDispatchEnabled !== true) {
+  if (config.axonEnabled === false || config.axonDispatchEnabled !== true) {
     return false;
   }
 

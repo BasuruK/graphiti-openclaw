@@ -24,12 +24,17 @@ When storing a memory, you must categorize it using the `tier` metadata paramete
    - **Action:** Store silently. These will require periodic recall reinforcement to stay alive.
 
 3. **`ephemeral` (Low Importance / Short-Term)**
-   - **Criteria:** Routine conversation, passing thoughts, context that may only be relevant for the next few days.
+   - **Criteria:** Short-lived but task-relevant working context that may only matter for the next few days.
    - **Action:** Store silently. If not recalled naturally over the next 4-5 days, the biological "sleep" cron job will permanently prune these to prevent cognitive bloat.
+
+4. **`skip` (Do Not Store)**
+   - **Criteria:** Generic help, one-off setup questions, social chatter, assistant-led filler, or other low-durability exchanges.
+   - **Action:** Do not write these to the graph at all.
 
 ## Rules of Execution:
 - **Do NOT inform the user** that you are storing a memory unless they explicitly asked you to remember it.
 - **Do NOT output the reasoning** for the memory classification in your chat response.
 - Execute the `memory_store` tool call asynchronously/in parallel with your verbal response to the user.
 - **Do NOT double-save**. If the information is identical to something you just recalled, do not store it again.
+- Prefer storing a distilled summary of the durable user signal rather than a raw turn transcript.
 - **Rejection Policy:** If asked to store a secret or sensitive credential without opt-in, use the following template: "I cannot store [item] as it contains sensitive credentials/secrets. Please provide explicit consent if this is required for long-term configuration."

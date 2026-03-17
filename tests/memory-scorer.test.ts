@@ -12,6 +12,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     forget: vi.fn(),
     update: vi.fn(),
     list: vi.fn().mockResolvedValue([]),
+    getById: vi.fn().mockResolvedValue(null),
     searchByEntity: vi.fn().mockResolvedValue([]),
     searchByTimeRange: vi.fn().mockResolvedValue([]),
     getRelated: vi.fn().mockResolvedValue([]),
@@ -20,6 +21,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     cleanup: vi.fn().mockResolvedValue({ deleted: 0, upgraded: 0 }),
     getUnconsolidatedMemories: vi.fn().mockResolvedValue([]),
     storeConsolidation: vi.fn(),
+    connect: vi.fn().mockResolvedValue(undefined),
     getBackendType: vi.fn().mockReturnValue('test'),
     ...overrides,
   } as unknown as MemoryAdapter;
@@ -38,6 +40,7 @@ describe('MemoryScorer', () => {
     ]);
 
     expect(result.tier).toBe('ephemeral');
+    expect(result.disposition).toBe('ephemeral');
     expect(result.recommendedAction).toBe('store_ephemeral');
     expect(result.reasoning).toContain('Scoring disabled');
   });
@@ -53,6 +56,7 @@ describe('MemoryScorer', () => {
     ]);
 
     expect(result.tier).toBe('ephemeral');
+    expect(result.disposition).toBe('skip');
     expect(result.recommendedAction).toBe('skip');
     expect(result.reasoning).toContain('skipping storage');
   });
@@ -79,6 +83,7 @@ describe('MemoryScorer', () => {
 
     expect(result.score).toBeLessThanOrEqual(2);
     expect(result.tier).toBe('ephemeral');
+    expect(result.disposition).toBe('skip');
     expect(result.recommendedAction).toBe('skip');
   });
 
@@ -94,7 +99,42 @@ describe('MemoryScorer', () => {
     ]);
 
     expect(result.score).toBeGreaterThanOrEqual(4);
+    expect(result.disposition === 'silent' || result.disposition === 'explicit').toBe(true);
     expect(result.tier === 'silent' || result.tier === 'explicit').toBe(true);
+  });
+
+  it('skips one-off product help questions instead of storing them as ephemeral', async () => {
+    const adapter = createAdapter();
+    const scorer = new MemoryScorer(adapter, {
+      minConversationLength: 1,
+    });
+
+    const result = await scorer.scoreConversation([
+      { role: 'user', content: 'How can I set thinking mode to high in OpenClaw?' },
+      { role: 'assistant', content: 'Open the config and switch the thinking mode setting to high.' },
+    ]);
+
+    expect(result.score).toBeLessThanOrEqual(2);
+    expect(result.disposition).toBe('skip');
+    expect(result.recommendedAction).toBe('skip');
+    expect(result.memoryKind).toBe('question');
+  });
+
+  it('keeps active short-term work context as ephemeral instead of skipping it', async () => {
+    const adapter = createAdapter();
+    const scorer = new MemoryScorer(adapter, {
+      minConversationLength: 1,
+    });
+
+    const result = await scorer.scoreConversation([
+      { role: 'user', content: 'Right now we are debugging this repo because the build is failing in CI and that is the current blocker for today.' },
+      { role: 'assistant', content: 'I will keep that blocker in working memory while we debug the issue.' },
+    ]);
+
+    expect(result.tier).toBe('ephemeral');
+    expect(result.disposition).toBe('ephemeral');
+    expect(result.recommendedAction).toBe('store_ephemeral');
+    expect(result.memoryKind).toBe('working_context');
   });
 
   it('counts total conversation segments for minMessageCount gating', async () => {

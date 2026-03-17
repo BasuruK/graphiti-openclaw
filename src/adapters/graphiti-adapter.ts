@@ -198,9 +198,6 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
    * Store a new memory episode
    */
   async store(content: string, metadata: Partial<MemoryMetadata>): Promise<string> {
-    // Extract tier from metadata for storage
-    const tierPrefix = metadata.tier ? `[${metadata.tier.toUpperCase()}] ` : '';
-
     // Build episode name from metadata
     const name = metadata.sessionId
       ? `session-${metadata.sessionId}-${Date.now()}`
@@ -226,13 +223,20 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
       tier: metadata.tier || 'silent',
       score: metadata.score || 5,
       source: metadata.source || 'auto_capture',
-      createdAt: new Date().toISOString(),
+      createdAt: (metadata.createdAt || new Date()).toISOString(),
+      reinforcementCount: metadata.reinforcementCount ?? 0,
       consolidated: metadata.consolidated || false,
     };
 
     if (metadata.sessionId) memoryData.sessionId = metadata.sessionId;
     if (metadata.expiresAt) memoryData.expiresAt = metadata.expiresAt.toISOString();
     if (metadata.tags) memoryData.tags = metadata.tags;
+    if (metadata.lastReinforced) memoryData.lastReinforced = metadata.lastReinforced.toISOString();
+    if (metadata.downgradedFrom != null) memoryData.downgradedFrom = metadata.downgradedFrom;
+    if (metadata.summary) memoryData.summary = metadata.summary;
+    if (metadata.memoryKind) memoryData.memoryKind = metadata.memoryKind;
+    if (metadata.disposition) memoryData.disposition = metadata.disposition;
+    if (metadata.sourceLog) memoryData.sourceLog = metadata.sourceLog;
 
     const meta: Record<string, unknown> = {
       content,
@@ -258,6 +262,14 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
           expiresAt: mem.expiresAt ? new Date(mem.expiresAt as string) : undefined,
           tags: mem.tags as string[] | undefined,
           consolidated: mem.consolidated as boolean | undefined,
+          createdAt: mem.createdAt ? new Date(mem.createdAt as string) : undefined,
+          lastReinforced: mem.lastReinforced ? new Date(mem.lastReinforced as string) : undefined,
+          reinforcementCount: typeof mem.reinforcementCount === 'number' ? mem.reinforcementCount : undefined,
+          downgradedFrom: mem.downgradedFrom as number | undefined,
+          summary: mem.summary as string | undefined,
+          memoryKind: mem.memoryKind as MemoryMetadata['memoryKind'],
+          disposition: mem.disposition as MemoryMetadata['disposition'],
+          sourceLog: mem.sourceLog as MemoryMetadata['sourceLog'],
         };
       }
       // Fallback: check for tier prefix in raw content
@@ -285,7 +297,13 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
   private extractContent(content: string): string {
     try {
       const parsed = JSON.parse(content);
-      return parsed.content || content;
+      if (typeof parsed.content === 'string' && parsed.content.length > 0) {
+        return parsed.content;
+      }
+      if (typeof parsed.summary === 'string' && parsed.summary.length > 0) {
+        return parsed.summary;
+      }
+      return content;
     } catch {
       return content;
     }
@@ -340,18 +358,30 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
   }): MemoryResult {
     const content = result.summary || result.fact || result.name || '';
     const metadata = this.parseMetadata(content);
+    const extractedContent = this.extractContent(content);
+    const createdAt = metadata.createdAt || (result.valid_at ? new Date(result.valid_at) : new Date());
 
     return {
       id: result.uuid || result.name || `unknown-${Date.now()}`,
-      content: this.extractContent(content),
-      summary: result.summary,
+      content: extractedContent,
+      summary: metadata.summary || result.summary || extractedContent.substring(0, 200),
       relevanceScore: 0.8, // Graphiti doesn't expose relevance directly
       metadata: {
         tier: metadata.tier || 'silent',
         score: metadata.score || 5,
         source: metadata.source || 'auto_capture',
-        createdAt: new Date(),
-        reinforcementCount: 0,
+        createdAt,
+        reinforcementCount: metadata.reinforcementCount ?? 0,
+        expiresAt: metadata.expiresAt,
+        sessionId: metadata.sessionId,
+        tags: metadata.tags,
+        lastReinforced: metadata.lastReinforced,
+        downgradedFrom: metadata.downgradedFrom,
+        consolidated: metadata.consolidated,
+        summary: metadata.summary,
+        memoryKind: metadata.memoryKind,
+        disposition: metadata.disposition,
+        sourceLog: metadata.sourceLog,
       },
       validAt: result.valid_at ? new Date(result.valid_at) : undefined,
     };
@@ -396,18 +426,35 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
       return [];
     }
 
-    let memories = episodes.map((r) => ({
-      id: r.uuid,
-      content: this.extractContent(r.content),
-      summary: r.content.substring(0, 200),
-      relevanceScore: 0.8,
-      metadata: {
-        ...this.parseMetadata(r.content),
-        createdAt: new Date(r.created_at),
-        reinforcementCount: 0,
-      } as MemoryMetadata,
-      validAt: new Date(r.created_at),
-    }));
+    let memories = episodes.map((r) => {
+      const parsedMetadata = this.parseMetadata(r.content);
+      const extractedContent = this.extractContent(r.content);
+
+      return {
+        id: r.uuid,
+        content: extractedContent,
+        summary: parsedMetadata.summary || extractedContent.substring(0, 200),
+        relevanceScore: 0.8,
+        metadata: {
+          tier: parsedMetadata.tier || 'silent',
+          score: parsedMetadata.score || 5,
+          source: parsedMetadata.source || 'auto_capture',
+          createdAt: parsedMetadata.createdAt || new Date(r.created_at),
+          reinforcementCount: parsedMetadata.reinforcementCount ?? 0,
+          expiresAt: parsedMetadata.expiresAt,
+          sessionId: parsedMetadata.sessionId,
+          tags: parsedMetadata.tags,
+          lastReinforced: parsedMetadata.lastReinforced,
+          downgradedFrom: parsedMetadata.downgradedFrom,
+          consolidated: parsedMetadata.consolidated,
+          summary: parsedMetadata.summary,
+          memoryKind: parsedMetadata.memoryKind,
+          disposition: parsedMetadata.disposition,
+          sourceLog: parsedMetadata.sourceLog,
+        } as MemoryMetadata,
+        validAt: parsedMetadata.createdAt || new Date(r.created_at),
+      };
+    });
 
     // Filter by tier if specified
     if (tier && tier !== 'all') {
@@ -415,6 +462,26 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     }
 
     return memories;
+  }
+
+  async getById(id: string): Promise<MemoryResult | null> {
+    let limit = 50;
+
+    while (limit <= 3200) {
+      const memories = await this.list(limit, 'all');
+      const match = memories.find((memory) => memory.id === id);
+      if (match) {
+        return match;
+      }
+
+      if (memories.length < limit) {
+        return null;
+      }
+
+      limit *= 2;
+    }
+
+    return null;
   }
 
   /**
@@ -579,6 +646,9 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
       tags: ['insight', 'synthesis'],
       consolidated: true, // Insights are pre-consolidated
       score: 10,
+      summary,
+      memoryKind: 'insight',
+      disposition: 'explicit',
     });
 
     logger.info(`Stored insight for ${sourceIds.length} source memories.`);
@@ -587,12 +657,7 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     // We iterate the connections and call the Graphiti edge-creation tool
     for (const conn of connections) {
       try {
-        await this.callTool('add_edge', {
-          group_id: this.config.groupId,
-          from_node_uuid: conn.fromId,
-          to_node_uuid: conn.toId,
-          label: conn.relationship,
-        });
+        await this.connect(conn.fromId, conn.toId, conn.relationship);
       } catch (err) {
         logger.error(`Failed to create edge ${conn.fromId} -> ${conn.toId}: ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -603,29 +668,9 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
     // We are intentionally using a full fetch (list) + per-id update due to API limits.
     // Revisit for batch/filtered fetch or partial update when Graphiti exposes those capabilities.
     if (sourceIds.length > 0) {
-      // Need to fetch them to update them since Graphiti doesn't have partial update.
-      // Because list() only returns the most recent N items, grow the fetch window until
-      // every source id is found or Graphiti returns fewer rows than requested.
-      let limit = Math.max(200, sourceIds.length);
-      let allMemories: MemoryResult[] = [];
-      const missingIds = new Set(sourceIds);
-
-      while (missingIds.size > 0) {
-        allMemories = await this.list(limit);
-        for (const mem of allMemories) {
-          missingIds.delete(mem.id);
-        }
-
-        if (allMemories.length < limit) {
-          break;
-        }
-
-        limit *= 2;
-      }
-
       let updatedCount = 0;
       for (const id of sourceIds) {
-        const mem = allMemories.find(m => m.id === id);
+        const mem = await this.getById(id);
         if (mem) {
           await this.update(id, mem.content, {
             ...mem.metadata,
@@ -638,6 +683,15 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
       }
       logger.info(`Marked ${updatedCount} source memories as consolidated.`);
     }
+  }
+
+  async connect(fromId: string, toId: string, relationship: string): Promise<void> {
+    await this.callTool('add_edge', {
+      group_id: this.config.groupId,
+      from_node_uuid: fromId,
+      to_node_uuid: toId,
+      label: relationship.trim().replace(/\s+/g, '_').toUpperCase(),
+    });
   }
 
   /**
