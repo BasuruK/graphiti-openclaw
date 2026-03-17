@@ -62,7 +62,38 @@ function formatError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function registerProcessCleanup(handler: () => Promise<void>): void {
+const BOOLEAN_TRUE_VALUES = new Set(['true', '1', 'yes', 'y', 'on']);
+const BOOLEAN_FALSE_VALUES = new Set(['false', '0', 'no', 'n', 'off']);
+const BACKEND_VALUES = ['graphiti-mcp', 'auto'] as const;
+const TRANSPORT_VALUES = ['stdio', 'sse', 'http'] as const;
+const LOG_LEVEL_VALUES = ['silent', 'error', 'warn', 'info', 'debug'] as const;
+const DEFAULT_PLUGIN_CONFIG: ResolvedPluginConfig = {
+  backend: 'graphiti-mcp',
+  endpoint: 'http://localhost:8000/mcp/',
+  transport: 'http',
+  groupId: 'default',
+  logLevel: 'warn',
+  autoCapture: true,
+  autoRecall: true,
+  recallMaxFacts: 5,
+  minPromptLength: 20,
+  scoringEnabled: true,
+  scoringLegacyEnabled: false,
+  scoringLegacyMode: false,
+  scoringExplicitThreshold: 8,
+  scoringEphemeralThreshold: 4,
+  scoringEphemeralHours: 72,
+  scoringSilentDays: 30,
+  scoringCleanupHours: 12,
+  scoringNotifyExplicit: true,
+  scoringAskBeforeDowngrade: true,
+  scoringMinConversationLength: 50,
+  scoringMinMessageCount: 1,
+  scoringDefaultTier: 'silent',
+  axonDispatchEnabled: false,
+};
+
+function registerProcessCleanup(handler: () => Promise<void>, bindProcessSignals = true): void {
   processCleanupHandler = handler;
 
   if (processCleanupRegistered) {
@@ -99,15 +130,68 @@ function registerProcessCleanup(handler: () => Promise<void>): void {
     });
   };
 
-  process.once('disconnect', () => {
-    void runCleanup('disconnect', true);
-  });
+  if (bindProcessSignals) {
+    process.once('disconnect', () => {
+      void runCleanup('disconnect', true);
+    });
 
-  bindSignal('SIGINT');
-  bindSignal('SIGTERM');
-  if (process.platform !== 'win32') {
-    bindSignal('SIGHUP');
+    bindSignal('SIGINT');
+    bindSignal('SIGTERM');
+    if (process.platform !== 'win32') {
+      bindSignal('SIGHUP');
+    }
   }
+}
+
+function normalizeBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    if (value === 1) return true;
+    if (value === 0) return false;
+    return fallback;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (BOOLEAN_TRUE_VALUES.has(normalized)) {
+      return true;
+    }
+    if (BOOLEAN_FALSE_VALUES.has(normalized)) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeString(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function normalizeEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+
+  return (allowed as readonly string[]).includes(value) ? value as T : fallback;
+}
+
+function normalizeNumber(value: unknown, fallback: number, min?: number): number {
+  const numericValue = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
+  if (!Number.isFinite(numericValue)) {
+    return fallback;
+  }
+
+  const normalized = Math.round(numericValue);
+  return min == null ? normalized : Math.max(min, normalized);
 }
 
 /**
@@ -192,31 +276,36 @@ function validateScoringConfig(config: Record<string, unknown>): void {
 }
 
 export function resolvePluginConfig(rawConfig: Record<string, unknown>): ResolvedPluginConfig {
-  return {
-    backend: 'graphiti-mcp',
-    endpoint: 'http://localhost:8000/mcp/',
-    transport: 'http',
-    groupId: 'default',
-    logLevel: 'warn',
-    autoCapture: true,
-    autoRecall: true,
-    recallMaxFacts: 5,
-    minPromptLength: 20,
-    scoringEnabled: true,
-    scoringLegacyEnabled: false,
-    scoringLegacyMode: false,
-    scoringExplicitThreshold: 8,
-    scoringEphemeralThreshold: 4,
-    scoringEphemeralHours: 72,
-    scoringSilentDays: 30,
-    scoringCleanupHours: 12,
-    scoringNotifyExplicit: true,
-    scoringAskBeforeDowngrade: true,
-    scoringMinConversationLength: 50,
-    scoringMinMessageCount: 1,
-    scoringDefaultTier: 'silent',
-    axonDispatchEnabled: false,
+  const config = {
     ...rawConfig,
+    backend: normalizeEnum(rawConfig.backend, BACKEND_VALUES, DEFAULT_PLUGIN_CONFIG.backend),
+    endpoint: normalizeString(rawConfig.endpoint, DEFAULT_PLUGIN_CONFIG.endpoint),
+    transport: normalizeEnum(rawConfig.transport, TRANSPORT_VALUES, DEFAULT_PLUGIN_CONFIG.transport),
+    groupId: normalizeString(rawConfig.groupId, DEFAULT_PLUGIN_CONFIG.groupId),
+    logLevel: normalizeEnum(rawConfig.logLevel, LOG_LEVEL_VALUES, DEFAULT_PLUGIN_CONFIG.logLevel),
+    autoCapture: normalizeBoolean(rawConfig.autoCapture, DEFAULT_PLUGIN_CONFIG.autoCapture),
+    autoRecall: normalizeBoolean(rawConfig.autoRecall, DEFAULT_PLUGIN_CONFIG.autoRecall),
+    recallMaxFacts: normalizeNumber(rawConfig.recallMaxFacts, DEFAULT_PLUGIN_CONFIG.recallMaxFacts, 1),
+    minPromptLength: normalizeNumber(rawConfig.minPromptLength, DEFAULT_PLUGIN_CONFIG.minPromptLength, 0),
+    scoringEnabled: normalizeBoolean(rawConfig.scoringEnabled, DEFAULT_PLUGIN_CONFIG.scoringEnabled),
+    scoringLegacyEnabled: normalizeBoolean(rawConfig.scoringLegacyEnabled, DEFAULT_PLUGIN_CONFIG.scoringLegacyEnabled),
+    scoringLegacyMode: normalizeBoolean(rawConfig.scoringLegacyMode, DEFAULT_PLUGIN_CONFIG.scoringLegacyMode),
+    scoringExplicitThreshold: normalizeNumber(rawConfig.scoringExplicitThreshold, DEFAULT_PLUGIN_CONFIG.scoringExplicitThreshold, 1),
+    scoringEphemeralThreshold: normalizeNumber(rawConfig.scoringEphemeralThreshold, DEFAULT_PLUGIN_CONFIG.scoringEphemeralThreshold, 0),
+    scoringEphemeralHours: normalizeNumber(rawConfig.scoringEphemeralHours, DEFAULT_PLUGIN_CONFIG.scoringEphemeralHours, 1),
+    scoringSilentDays: normalizeNumber(rawConfig.scoringSilentDays, DEFAULT_PLUGIN_CONFIG.scoringSilentDays, 1),
+    scoringCleanupHours: normalizeNumber(rawConfig.scoringCleanupHours, DEFAULT_PLUGIN_CONFIG.scoringCleanupHours, 1),
+    scoringNotifyExplicit: normalizeBoolean(rawConfig.scoringNotifyExplicit, DEFAULT_PLUGIN_CONFIG.scoringNotifyExplicit),
+    scoringAskBeforeDowngrade: normalizeBoolean(rawConfig.scoringAskBeforeDowngrade, DEFAULT_PLUGIN_CONFIG.scoringAskBeforeDowngrade),
+    scoringMinConversationLength: normalizeNumber(rawConfig.scoringMinConversationLength, DEFAULT_PLUGIN_CONFIG.scoringMinConversationLength, 0),
+    scoringMinMessageCount: normalizeNumber(rawConfig.scoringMinMessageCount, DEFAULT_PLUGIN_CONFIG.scoringMinMessageCount, 1),
+    scoringDefaultTier: normalizeEnum(rawConfig.scoringDefaultTier, ['explicit', 'silent', 'ephemeral'] as const, DEFAULT_PLUGIN_CONFIG.scoringDefaultTier),
+    axonDispatchEnabled: normalizeBoolean(rawConfig.axonDispatchEnabled, DEFAULT_PLUGIN_CONFIG.axonDispatchEnabled),
+  };
+
+  return {
+    ...DEFAULT_PLUGIN_CONFIG,
+    ...config,
   };
 }
 
@@ -510,11 +599,14 @@ export default {
       }
     };
 
-    registerProcessCleanup(shutdownHandler);
+    const hasHostShutdownHook = typeof api?.onShutdown === 'function';
+    const hasHostEventBus = typeof api?.on === 'function';
 
-    if (typeof api?.onShutdown === 'function') {
+    registerProcessCleanup(shutdownHandler, !hasHostShutdownHook && !hasHostEventBus);
+
+    if (hasHostShutdownHook) {
       api.onShutdown(shutdownHandler);
-    } else if (typeof api?.on === 'function') {
+    } else if (hasHostEventBus) {
       api.on('shutdown', shutdownHandler);
     }
 

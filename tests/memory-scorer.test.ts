@@ -79,6 +79,7 @@ describe('MemoryScorer', () => {
 
     expect(result.score).toBeLessThanOrEqual(2);
     expect(result.tier).toBe('ephemeral');
+    expect(result.recommendedAction).toBe('skip');
   });
 
   it('scores durable user-led preferences above trivial chatter', async () => {
@@ -94,6 +95,66 @@ describe('MemoryScorer', () => {
 
     expect(result.score).toBeGreaterThanOrEqual(4);
     expect(result.tier === 'silent' || result.tier === 'explicit').toBe(true);
+  });
+
+  it('counts total conversation segments for minMessageCount gating', async () => {
+    const adapter = createAdapter();
+    const scorer = new MemoryScorer(adapter, {
+      minConversationLength: 1,
+      minMessageCount: 2,
+    });
+
+    const result = await scorer.scoreConversation([
+      { role: 'user', content: 'Please remember that we decided to use pnpm for this repo.' },
+      { role: 'assistant', content: 'I will keep that repo decision in mind for future coding help.' },
+    ]);
+
+    expect(result.recommendedAction).not.toBe('skip');
+    expect(result.tier === 'silent' || result.tier === 'explicit').toBe(true);
+  });
+
+  it('preserves turn order in local-model scoring prompts', async () => {
+    const adapter = createAdapter();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: '{"score":6,"tier":"silent","reasoning":"keeps order"}',
+            },
+          },
+        ],
+      }),
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const scorer = new MemoryScorer(adapter, {
+        minConversationLength: 1,
+        scoringModel: {
+          provider: 'openai',
+          endpoint: 'http://localhost:8080',
+          model: 'test-model',
+        },
+      });
+
+      await scorer.scoreConversation([
+        { role: 'user', content: 'First user turn' },
+        { role: 'assistant', content: 'Assistant reply' },
+        { role: 'user', content: 'Follow-up user turn' },
+      ]);
+
+      const [, requestInit] = fetchMock.mock.calls[0];
+      const body = JSON.parse(String(requestInit?.body));
+      const userPrompt = body.messages[1].content as string;
+
+      expect(userPrompt.indexOf('user: First user turn')).toBeLessThan(userPrompt.indexOf('assistant: Assistant reply'));
+      expect(userPrompt.indexOf('assistant: Assistant reply')).toBeLessThan(userPrompt.indexOf('user: Follow-up user turn'));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('upgrades reinforced ephemeral memories during reinforcement processing', async () => {

@@ -61,30 +61,34 @@ function emit(level: Exclude<LogLevel, 'silent'>, scope: string, message: string
   const formatted = formatMessage(scope, message);
   const logger = currentHostLogger;
 
-  if (level === 'debug') {
-    if (typeof logger?.debug === 'function') {
-      logger.debug(formatted);
-      return;
+  try {
+    if (level === 'debug') {
+      if (typeof logger?.debug === 'function') {
+        logger.debug(formatted);
+        return;
+      }
+      if (typeof logger?.info === 'function') {
+        logger.info(formatted);
+        return;
+      }
     }
-    if (typeof logger?.info === 'function') {
+
+    if (level === 'info' && typeof logger?.info === 'function') {
       logger.info(formatted);
       return;
     }
-  }
 
-  if (level === 'info' && typeof logger?.info === 'function') {
-    logger.info(formatted);
-    return;
-  }
+    if (level === 'warn' && typeof logger?.warn === 'function') {
+      logger.warn(formatted);
+      return;
+    }
 
-  if (level === 'warn' && typeof logger?.warn === 'function') {
-    logger.warn(formatted);
-    return;
-  }
-
-  if (level === 'error' && typeof logger?.error === 'function') {
-    logger.error(formatted);
-    return;
+    if (level === 'error' && typeof logger?.error === 'function') {
+      logger.error(formatted);
+      return;
+    }
+  } catch {
+    // Fall through to console logging when host callbacks throw.
   }
 
   writeToConsole(level, formatted);

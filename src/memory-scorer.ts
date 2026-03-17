@@ -81,6 +81,8 @@ export interface ConversationSegment {
 }
 
 type ConversationBreakdown = {
+  orderedSegments: ConversationSegment[];
+  segmentCount: number;
   userSegments: ConversationSegment[];
   assistantSegments: ConversationSegment[];
   userContent: string;
@@ -189,7 +191,7 @@ export class MemoryScorer {
 
     if (
       breakdown.totalLength < this.config.minConversationLength ||
-      breakdown.userSegments.length < this.config.minMessageCount
+      breakdown.segmentCount < this.config.minMessageCount
     ) {
       // Check for explicit markers even in short messages
       if (!this.detectExplicitMarkers(breakdown.userContent)) {
@@ -292,6 +294,8 @@ export class MemoryScorer {
     const totalLength = userLength + assistantLength;
 
     return {
+      orderedSegments: segments,
+      segmentCount: segments.length,
       userSegments,
       assistantSegments,
       userContent,
@@ -613,7 +617,7 @@ export class MemoryScorer {
       '  - If the conversation is mostly assistant response text or generic assistance, keep the score between 0 and 2.',
     ].join('\n');
 
-    const conversationText = [...breakdown.userSegments, ...breakdown.assistantSegments]
+    const conversationText = breakdown.orderedSegments
       .map(s => `${s.role}: ${s.content}`)
       .join('\n');
 

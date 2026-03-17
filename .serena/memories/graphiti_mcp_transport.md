@@ -1,0 +1,1 @@
+Graphiti MCP current recommended remote transport is streamable HTTP at http://localhost:8000/mcp/. SSE at /sse is deprecated and caused 404s when Nuron defaulted to it. Nuron should default transport=http and endpoint=/mcp/, while keeping explicit sse support for legacy servers.

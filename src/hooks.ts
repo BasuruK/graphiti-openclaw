@@ -22,13 +22,14 @@ const MIN_MESSAGE_LENGTH = 20;
 /** Maximum messages to capture per turn */
 const MAX_CAPTURE_MESSAGES = 15;
 
-const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>/gi;
+const THINK_BLOCK_RE = /<think\b[^>]*>[\s\S]*?(?:<\/think>|$)/gi;
 const XML_TAG_RE = /<[^>]+>/g;
 const ASSISTANT_FILLER_PATTERNS = [
-  /^(great|awesome|sure|absolutely|definitely|certainly|okay|ok|got it|understood|sounds good|no problem|of course|happy to help|glad to help|let me help|i can help)([!.\s,].*)?$/i,
-  /^(thanks|thank you|you're welcome|you are welcome)([!.\s,].*)?$/i,
-  /^(here'?s|here are|i'll|i will|let's|lets)\b/i,
+  /^(great|awesome|sure|absolutely|definitely|certainly|okay|ok|got it|understood|sounds good|no problem|of course|happy to help|glad to help|let me help|i can help)(?:[!.\s,]+)?$/i,
+  /^(thanks|thank you|you're welcome|you are welcome)(?:[!.\s,]+)?$/i,
 ];
+const ASSISTANT_FILLER_PREFIX_RE = /^(?:(?:great|awesome|sure|absolutely|definitely|certainly|okay|ok|got it|understood|sounds good|no problem|of course|thanks|thank you|you're welcome|you are welcome)[!.\s,]+)+/i;
+const ASSISTANT_GENERIC_REPLY_RE = /^(?:i can help with that|i can help|happy to help|let me help|i'll help|i will help|here to help|what can i do for you)(?:[!.\s,]+)?$/i;
 
 function sanitizeMessageText(text: string): string {
   return text
@@ -41,7 +42,22 @@ function sanitizeMessageText(text: string): string {
 function isAssistantFillerResponse(text: string): boolean {
   if (!text) return true;
   if (text.length > 180) return false;
-  return ASSISTANT_FILLER_PATTERNS.some((pattern) => pattern.test(text));
+
+  if (ASSISTANT_FILLER_PATTERNS.some((pattern) => pattern.test(text))) {
+    return true;
+  }
+
+  const trimmed = text.trim();
+  const withoutLeadingFiller = trimmed.replace(ASSISTANT_FILLER_PREFIX_RE, '').trim();
+  if (withoutLeadingFiller === trimmed) {
+    return false;
+  }
+
+  return (
+    withoutLeadingFiller.length === 0 ||
+    ASSISTANT_FILLER_PATTERNS.some((pattern) => pattern.test(withoutLeadingFiller)) ||
+    ASSISTANT_GENERIC_REPLY_RE.test(withoutLeadingFiller)
+  );
 }
 
 function extractConversationSegments(messages: any[]): ConversationSegment[] {

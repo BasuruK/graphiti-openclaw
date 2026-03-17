@@ -31,4 +31,34 @@ describe('resolvePluginConfig', () => {
     expect(config.transport).toBe('sse');
     expect(config.logLevel).toBe('debug');
   });
+
+  it('normalizes enum, boolean, and numeric overrides before runtime use', () => {
+    const config = resolvePluginConfig({
+      backend: 'unsupported',
+      transport: 'bogus',
+      logLevel: 'verbose',
+      autoCapture: 'false',
+      autoRecall: 0,
+      scoringEnabled: '1',
+      recallMaxFacts: '0',
+      minPromptLength: '12',
+      scoringMinMessageCount: '2',
+      scoringExplicitThreshold: '9',
+      scoringEphemeralThreshold: '-2',
+      axonDispatchEnabled: 'yes',
+    });
+
+    expect(config.backend).toBe('graphiti-mcp');
+    expect(config.transport).toBe('http');
+    expect(config.logLevel).toBe('warn');
+    expect(config.autoCapture).toBe(false);
+    expect(config.autoRecall).toBe(false);
+    expect(config.scoringEnabled).toBe(true);
+    expect(config.recallMaxFacts).toBe(1);
+    expect(config.minPromptLength).toBe(12);
+    expect(config.scoringMinMessageCount).toBe(2);
+    expect(config.scoringExplicitThreshold).toBe(9);
+    expect(config.scoringEphemeralThreshold).toBe(0);
+    expect(config.axonDispatchEnabled).toBe(true);
+  });
 });
