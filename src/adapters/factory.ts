@@ -24,9 +24,9 @@ function inferGraphitiTransport(endpoint?: string): 'sse' | undefined {
 }
 
 function resolveGraphitiTransport(
-  transport?: 'stdio' | 'sse',
+  transport?: 'stdio' | 'sse' | 'http',
   endpoint?: string
-): 'stdio' | 'sse' | undefined {
+): 'stdio' | 'sse' | 'http' | undefined {
   return transport ?? inferGraphitiTransport(endpoint);
 }
 
@@ -221,10 +221,10 @@ export async function createAdapterFromConfig(
           const adapter = adapterFactory.create({
             type: 'graphiti-mcp',
             transport: resolveGraphitiTransport(
-              config.transport as 'stdio' | 'sse' | undefined,
+              config.transport as 'stdio' | 'sse' | 'http' | undefined,
               config.endpoint as string | undefined
             ),
-            endpoint: (config.endpoint as string) || 'http://localhost:8000/sse',
+            endpoint: (config.endpoint as string) || 'http://localhost:8000/mcp/',
             groupId: (config.groupId as string) || 'default',
           });
           await adapter.initialize();
@@ -234,7 +234,7 @@ export async function createAdapterFromConfig(
           return adapterFactory.autoDetect({
             endpoint: config.endpoint as string | undefined,
             transport: resolveGraphitiTransport(
-              config.transport as 'stdio' | 'sse' | undefined,
+              config.transport as 'stdio' | 'sse' | 'http' | undefined,
               config.endpoint as string | undefined
             ),
             groupId: (config.groupId as string) || 'default',
@@ -249,7 +249,7 @@ export async function createAdapterFromConfig(
           return adapterFactory.autoDetect({
             endpoint: config.endpoint as string | undefined,
             transport: resolveGraphitiTransport(
-              config.transport as 'stdio' | 'sse' | undefined,
+              config.transport as 'stdio' | 'sse' | 'http' | undefined,
               config.endpoint as string | undefined
             ),
             groupId: (config.groupId as string) || 'default',

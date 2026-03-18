@@ -54,8 +54,6 @@ describe('registerHooks', () => {
     const beforeAgentStart = api.handlers.get('before_agent_start')!;
     const result = await beforeAgentStart({ prompt: 'What do you remember about my editor setup?' });
 
-    expect(result.prependContext).toContain('<system_memory_instructions>');
-    expect(result.prependSystemContext).toBe(result.prependContext);
     expect(result.prependContext).toContain('No relevant memories found.');
     expect(result.prependContext).not.toContain('<system_memory_instructions>');
     expect(result.prependSystemContext).toContain('<system_memory_instructions>');

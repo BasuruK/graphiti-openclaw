@@ -16,6 +16,11 @@
 
 import { Type } from '@sinclair/typebox';
 import type { ConsolidationConnection, MemoryAdapter } from './adapters/memory-adapter.js';
+import { applyAxonPlan, collectAxonDailySources, type AxonPlanOperation, type AxonRuntimeConfig } from './axon.js';
+import { getLogger } from './logger.js';
+import { reinforceMemories } from './memory-maintenance.js';
+
+const logger = getLogger('tools');
 
 /** Valid memory tier values */
 const VALID_TIERS = ['explicit', 'silent', 'ephemeral', 'all'] as const;
@@ -152,6 +157,9 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
           tier: storageTier,
           score: storageTier === 'explicit' ? 9 : storageTier === 'silent' ? 6 : 3,
           source: 'user_explicit',
+          disposition: storageTier,
+          summary: params.content,
+          memoryKind: 'fact',
           name: params.name,
         });
 
