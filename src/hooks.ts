@@ -25,6 +25,35 @@ const MEMORY_MD_PATH = path.resolve(__dirname, '../MEMORY.md');
 
 let memoryInstructionsCache: { mtimeMs: number; value: string } | null = null;
 
+function hasExplicitMemoryMarker(content: string): boolean {
+  const lowerContent = content.toLowerCase();
+  return [
+    'remember',
+    'dont forget',
+    "don't forget",
+    'important',
+    'note that',
+    'keep in mind',
+    'save this',
+    'store this',
+  ].some((marker) => lowerContent.includes(marker));
+}
+
+function isAssistantFillerResponse(content: string): boolean {
+  const normalized = content.toLowerCase().trim();
+  return [
+    'ok',
+    'okay',
+    'sure',
+    'got it',
+    'understood',
+    'i understand',
+    'i will keep that in mind',
+    'i will remember that',
+    'i will keep that in mind for future coding help.',
+  ].includes(normalized);
+}
+
 function getCachedMemoryInstructions(): string {
   try {
     if (!fs.existsSync(MEMORY_MD_PATH)) {
@@ -116,10 +145,12 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       console.log(`[nuron] Auto-recall: Found ${results ? results.length : 0} relevant memories`);
 
       const memoryInstructions = getCachedMemoryInstructions();
+      const prependedContext = `<memory>\nRelevant memories:\n${contextBlock}\n</memory>\n\n<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`;
 
-      // Inject context via prependContext (always include instructions)
+      // Return both keys for backwards compatibility with OpenClaw host variants.
       return {
-        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>\n\n<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`
+        prependContext: prependedContext,
+        prependSystemContext: prependedContext,
       };
     } catch (err) {
       console.error('[nuron] Auto-recall error:', err instanceof Error ? err.message : String(err));
@@ -164,12 +195,24 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
           }
         }
 
-        // Skip short messages and injected context
-        if (!text || text.length < MIN_MESSAGE_LENGTH) continue;
-        if (text.includes('<memory>') || text.includes('<relevant-memories>')) continue;
+        const sanitized = text.trim();
+        if (!sanitized) continue;
+
+        if (
+          sanitized.includes('Relevant memories:') ||
+          sanitized.includes('system_memory_instructions') ||
+          sanitized.includes('<memory>') ||
+          sanitized.includes('<relevant-memories>')
+        ) {
+          continue;
+        }
+
+        if (role === 'assistant' && isAssistantFillerResponse(sanitized)) continue;
+
+        if (sanitized.length < MIN_MESSAGE_LENGTH && !hasExplicitMemoryMarker(sanitized)) continue;
 
         conversationSegments.push({
-          content: text.slice(0, 500),
+          content: sanitized.slice(0, 500),
           role: role as 'user' | 'assistant'
         });
       }
@@ -203,8 +246,6 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
   // Register heartbeat/cleanup hook
   api.on('heartbeat', async () => {
-    if (!scoringConfig.enabled) return;
-
     // Throttle: only run maintenance every cleanupIntervalHours
     const intervalMs = (scoringConfig.cleanupIntervalHours ?? DEFAULT_SCORING_CONFIG.cleanupIntervalHours) * 3600000;
     const now = Date.now();
@@ -213,7 +254,10 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     console.log('[nuron] Running scheduled memory maintenance...');
 
     // Legacy Scorers: Only run if explicitly enabled (opt-in)
-    if (config.scoringLegacyEnabled === true || config.scoringLegacyMode === true) {
+    if (
+      scoringConfig.enabled &&
+      (config.scoringLegacyEnabled === true || config.scoringLegacyMode === true)
+    ) {
       // Cleanup expired ephemeral memories (isolated)
       try {
         const cleanup = await scorer.cleanupExpiredMemories();
@@ -287,18 +331,20 @@ async function dispatchAxonTrigger(api: any, config: any): Promise<boolean> {
     timestamp: Date.now()
   };
 
-  const dispatchHook =
+  const dispatchTarget =
     typeof api?.dispatchAxonTrigger === 'function'
-      ? api.dispatchAxonTrigger
+      ? api
       : typeof api?.nuron?.dispatchAxonTrigger === 'function'
-        ? api.nuron.dispatchAxonTrigger
+        ? api.nuron
         : undefined;
+
+  const dispatchHook = dispatchTarget?.dispatchAxonTrigger;
 
   if (!dispatchHook) {
     console.warn('[nuron] Axon dispatch is enabled but no supported dispatch hook is available; skipping trigger.');
     return false;
   }
 
-  await Promise.resolve(dispatchHook(payload));
+  await Promise.resolve(dispatchHook.apply(dispatchTarget, [payload]));
   return true;
 }
