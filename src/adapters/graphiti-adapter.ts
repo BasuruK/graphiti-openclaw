@@ -28,6 +28,8 @@ const logger = getLogger('graphiti');
 
 const DEFAULT_HTTP_ENDPOINT = 'http://localhost:8000/mcp/';
 const DEFAULT_SSE_ENDPOINT = 'http://localhost:8000/sse';
+const MAX_GET_BY_ID_LIMIT = 3200;
+const MAX_GET_BY_ID_ITERATIONS = 7;
 
 function normalizeEndpointForTransport(
   endpoint: string | undefined,
@@ -414,8 +416,12 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
 
   async getById(id: string): Promise<MemoryResult | null> {
     let limit = 50;
+    let iterations = 0;
 
-    while (limit <= 3200) {
+    // TODO: Graphiti MCP does not currently expose a direct UUID lookup here, so getById
+    // falls back to repeated list() calls and remains O(N) up to the configured safety cap.
+    while (limit <= MAX_GET_BY_ID_LIMIT && iterations < MAX_GET_BY_ID_ITERATIONS) {
+      iterations += 1;
       const memories = await this.list(limit, 'all');
       const match = memories.find((memory) => memory.id === id);
       if (match) {
@@ -426,8 +432,12 @@ export class GraphitiMCPAdapter implements MemoryAdapter {
         return null;
       }
 
-      limit *= 2;
+      limit = Math.min(limit * 2, MAX_GET_BY_ID_LIMIT + 1);
     }
+
+    logger.warn(
+      `getById exhausted list() search without finding memory ${id}; finalLimit=${Math.min(limit, MAX_GET_BY_ID_LIMIT)}, iterations=${iterations}.`
+    );
 
     return null;
   }

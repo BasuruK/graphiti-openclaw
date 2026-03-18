@@ -300,10 +300,6 @@ async function storeWithMetadata(
   scoreResult: ScoringResult,
   conversationSegments: ConversationSegment[]
 ): Promise<void> {
-  if (scoreResult.disposition === 'skip') {
-    return;
-  }
-
   const expiresAt = scoreResult.expiresInHours
     ? new Date(Date.now() + scoreResult.expiresInHours * 3600000)
     : undefined;
@@ -313,10 +309,11 @@ async function storeWithMetadata(
     .join('\n');
   const hasShortExplicitReminder = conversationSegments.some((segment) => segment.content.length < MIN_MESSAGE_LENGTH);
   const storageContent = hasShortExplicitReminder ? transcript : scoreResult.summary;
+  const disposition = scoreResult.disposition as Exclude<ScoringResult['disposition'], 'skip'>;
 
   await adapter.store(storageContent, {
-    tier: scoreResult.disposition,
-    disposition: scoreResult.disposition,
+    tier: disposition,
+    disposition,
     score: scoreResult.score,
     source: 'auto_capture',
     sessionId,

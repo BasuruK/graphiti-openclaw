@@ -16,13 +16,14 @@ describe('plugin register', () => {
       shutdown: vi.fn().mockResolvedValue(undefined),
     };
     const create = vi.fn(() => adapter);
+    const createAdapterFromConfig = vi.fn().mockResolvedValue(adapter);
 
     vi.doMock('../src/adapters/factory.js', () => ({
       adapterFactory: {
         create,
         autoDetect: vi.fn(),
       },
-      createAdapterFromConfig: vi.fn(),
+      createAdapterFromConfig,
     }));
     vi.doMock('../src/tools.js', () => ({
       registerTools: vi.fn(),
@@ -49,7 +50,8 @@ describe('plugin register', () => {
 
     await plugin.register(api);
 
-    expect(create).toHaveBeenCalledTimes(1);
+    expect(createAdapterFromConfig).toHaveBeenCalledTimes(1);
+    expect(create).not.toHaveBeenCalled();
     expect(onShutdown).toHaveBeenCalledTimes(1);
     expect(processOnceSpy).not.toHaveBeenCalled();
   });

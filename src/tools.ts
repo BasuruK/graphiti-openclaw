@@ -15,7 +15,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import type { ConsolidationConnection, MemoryAdapter } from './adapters/memory-adapter.js';
+import type { ConsolidationConnection, MemoryAdapter, MemoryKind } from './adapters/memory-adapter.js';
 import { applyAxonPlan, collectAxonDailySources, type AxonPlanOperation, type AxonRuntimeConfig } from './axon.js';
 import { getLogger } from './logger.js';
 import { reinforceMemories } from './memory-maintenance.js';
@@ -25,6 +25,7 @@ const logger = getLogger('tools');
 /** Valid memory tier values */
 const VALID_TIERS = ['explicit', 'silent', 'ephemeral', 'all'] as const;
 type MemoryTier = typeof VALID_TIERS[number];
+const VALID_MEMORY_KINDS = ['preference', 'decision', 'task', 'fact', 'working_context', 'question', 'summary', 'insight', 'other'] as const;
 
 const TOOL_SOURCE = 'Source: Nuron OpenClaw plugin.';
 const BACKEND_PATH = 'Backend path for storage and recall operations: Nuron tool -> Graphiti MCP server -> Neo4j temporal knowledge graph.';
@@ -49,6 +50,31 @@ function normalizeTier(tier: string | undefined, defaultTier: MemoryTier = 'all'
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
+}
+
+function normalizeMemoryKind(memoryKind: string | undefined): MemoryKind | undefined {
+  if (!memoryKind) return undefined;
+  const normalized = memoryKind.trim().toLowerCase().replace(/\s+/g, '_');
+  return (VALID_MEMORY_KINDS as readonly string[]).includes(normalized) ? normalized as MemoryKind : undefined;
+}
+
+function inferMemoryKind(content: string): MemoryKind {
+  const normalized = content.toLowerCase();
+
+  if (/\b(i prefer|i like|my preference|preferred|always use|prefer to use)\b/.test(normalized)) {
+    return 'preference';
+  }
+  if (/\b(decided|decision|we agreed|we will|we'll|ship on|chosen)\b/.test(normalized)) {
+    return 'decision';
+  }
+  if (/\b(todo|to do|need to|follow up|task|next step|action item)\b/.test(normalized)) {
+    return 'task';
+  }
+  if (/\?$/.test(content.trim())) {
+    return 'question';
+  }
+
+  return 'fact';
 }
 
 function resolveAxonRuntimeConfig(
@@ -145,13 +171,15 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     parameters: Type.Object({
       content: Type.String({ description: 'The fact, preference, or reminder to persist through Nuron.' }),
       name: Type.Optional(Type.String({ description: 'Optional human-friendly name for this memory.' })),
+      memoryKind: Type.Optional(Type.String({ description: 'Optional memory kind: preference, decision, task, fact, working_context, question, summary, insight, or other.' })),
       tier: Type.Optional(Type.String({ description: 'Optional storage tier: explicit (permanent), silent (30d), or ephemeral (72h).', default: 'silent' }))
     }),
-    async execute(toolCallId: string, params: { content: string; name?: string; tier?: string }) {
+    async execute(toolCallId: string, params: { content: string; name?: string; tier?: string; memoryKind?: string }) {
       try {
         const tier = normalizeTier(params.tier, 'silent');
         // Exclude 'all' — it's only valid for queries, not storage
         const storageTier = tier === 'all' ? 'silent' : tier;
+        const resolvedMemoryKind = normalizeMemoryKind(params.memoryKind) ?? inferMemoryKind(params.content);
 
         const id = await adapter.store(params.content, {
           tier: storageTier,
@@ -159,13 +187,13 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
           source: 'user_explicit',
           disposition: storageTier,
           summary: params.content,
-          memoryKind: 'fact',
+          memoryKind: resolvedMemoryKind,
           name: params.name,
         });
 
         return {
           content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${storageTier}${params.name ? `\nName: ${params.name}` : ''}` }],
-          details: { id, tier: storageTier, name: params.name }
+          details: { id, tier: storageTier, name: params.name, memoryKind: resolvedMemoryKind }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);

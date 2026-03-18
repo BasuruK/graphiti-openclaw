@@ -19,7 +19,6 @@
 
 import { registerTools } from './tools.js';
 import { registerHooks } from './hooks.js';
-import { adapterFactory } from './adapters/factory.js';
 import { createAdapterFromConfig } from './adapters/factory.js';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
 import { configureLogger, getLogger, type LogLevel } from './logger.js';
@@ -650,24 +649,6 @@ export default {
       }
 
       adapter = await createAdapterFromConfig(config as unknown as Record<string, unknown>);
-
-      if (!adapter) {
-        adapter = config.backend === 'auto'
-          ? await adapterFactory.autoDetect({
-              type: 'graphiti-mcp',
-              endpoint: config.endpoint,
-              transport: config.transport,
-              groupId: config.groupId,
-            })
-          : adapterFactory.create({
-              type: 'graphiti-mcp',
-              endpoint: config.endpoint,
-              transport: config.transport,
-              groupId: config.groupId,
-            });
-
-        await adapter.initialize();
-      }
 
       const health = await adapter.healthCheck();
       if (!health.healthy) {

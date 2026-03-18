@@ -288,7 +288,7 @@ export async function createAdapterFromConfig(
   return adapterFactory.autoDetect({
     endpoint: config.endpoint as string | undefined,
     transport: resolveGraphitiTransport(
-      config.transport as 'stdio' | 'sse' | undefined,
+      config.transport as 'stdio' | 'sse' | 'http' | undefined,
       config.endpoint as string | undefined
     ),
     groupId: (config.groupId as string) || 'default',
