@@ -19,19 +19,19 @@
 
 import { registerTools } from './tools.js';
 import { registerHooks } from './hooks.js';
-import { adapterFactory } from './adapters/factory.js';
+import { createAdapterFromConfig } from './adapters/factory.js';
 import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import type { BackendConfig } from './adapters/memory-adapter.js';
-import { configureLogger, getLogger, type LogLevel } from './logger.js';
 
-const logger = getLogger();
+type PluginBackend = 'graphiti-mcp' | 'auto';
+type PluginTransport = 'stdio' | 'sse';
+type PluginTier = 'explicit' | 'silent' | 'ephemeral';
+type ScoringProvider = 'llamacpp' | 'openai' | 'none';
 
-type ResolvedPluginConfig = Record<string, unknown> & {
-  backend: 'graphiti-mcp' | 'auto';
+interface ResolvedPluginConfig {
+  backend: PluginBackend;
   endpoint: string;
-  transport: 'stdio' | 'sse' | 'http';
+  transport?: PluginTransport;
   groupId: string;
-  logLevel: LogLevel;
   autoCapture: boolean;
   autoRecall: boolean;
   recallMaxFacts: number;
@@ -48,17 +48,115 @@ type ResolvedPluginConfig = Record<string, unknown> & {
   scoringAskBeforeDowngrade: boolean;
   scoringMinConversationLength: number;
   scoringMinMessageCount: number;
-  scoringDefaultTier: 'explicit' | 'silent' | 'ephemeral';
+  scoringDefaultTier: PluginTier;
+  scoringModel: {
+    provider: ScoringProvider;
+    model?: string;
+    endpoint: string;
+    apiKey?: string;
+    timeoutMs: number;
+  };
   axonDispatchEnabled: boolean;
-  axonEnabled: boolean;
-  axonSessionLogDir: string;
-  axonLookbackHours: number;
-  axonEphemeralForgetDays: number;
-  axonSilentDecayDays: number;
-  axonBatchLimit: number;
-  axonMinRepeatCount: number;
-  axonDryRun: boolean;
+}
+
+const DEFAULT_PLUGIN_CONFIG: ResolvedPluginConfig = {
+  backend: 'graphiti-mcp',
+  endpoint: 'http://localhost:8000/sse',
+  transport: undefined,
+  groupId: 'default',
+  autoCapture: true,
+  autoRecall: true,
+  recallMaxFacts: 5,
+  minPromptLength: 20,
+  scoringEnabled: true,
+  scoringLegacyEnabled: false,
+  scoringLegacyMode: false,
+  scoringExplicitThreshold: 8,
+  scoringEphemeralThreshold: 4,
+  scoringEphemeralHours: 72,
+  scoringSilentDays: 30,
+  scoringCleanupHours: 12,
+  scoringNotifyExplicit: true,
+  scoringAskBeforeDowngrade: true,
+  scoringMinConversationLength: 50,
+  scoringMinMessageCount: 1,
+  scoringDefaultTier: 'silent',
+  scoringModel: {
+    provider: 'none',
+    endpoint: 'http://localhost:8080',
+    timeoutMs: 10000,
+  },
+  axonDispatchEnabled: false,
 };
+
+function coerceBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    return value !== 0;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+    if (['false', '0', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function coerceString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function coerceEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? value as T
+    : fallback;
+}
+
+function coerceOptionalEnum<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return typeof value === 'string' && (allowed as readonly string[]).includes(value)
+    ? value as T
+    : undefined;
+}
+
+function coerceNumber(
+  value: unknown,
+  fallback: number,
+  minimum?: number,
+  maximum?: number
+): number {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && value.trim()
+      ? Number(value)
+      : Number.NaN;
+
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  let normalized = parsed;
+  if (minimum != null) {
+    normalized = Math.max(minimum, normalized);
+  }
+  if (maximum != null) {
+    normalized = Math.min(maximum, normalized);
+  }
+
+  return normalized;
+}
 
 /** Previous plugin IDs for migration compatibility */
 const LEGACY_PLUGIN_IDS = ['graphiti', 'graphiti-memory'];
@@ -252,9 +350,14 @@ function validateScoringConfig(config: Record<string, unknown>): void {
     logger.warn('scoringEphemeralThreshold must be >= 0, clamping to 0');
     config.scoringEphemeralThreshold = 0;
   }
-  if (explicitThreshold != null && ephemeralThreshold != null && explicitThreshold <= ephemeralThreshold) {
-    logger.warn('scoringExplicitThreshold must be > scoringEphemeralThreshold, adjusting');
-    config.scoringExplicitThreshold = (ephemeralThreshold as number) + 1;
+  const clampedEphemeralThreshold = config.scoringEphemeralThreshold as number | undefined;
+  if (
+    explicitThreshold != null &&
+    clampedEphemeralThreshold != null &&
+    explicitThreshold <= clampedEphemeralThreshold
+  ) {
+    console.warn('[nuron] scoringExplicitThreshold must be > scoringEphemeralThreshold, adjusting');
+    config.scoringExplicitThreshold = Number(config.scoringEphemeralThreshold) + 1;
   }
   if (config.scoringEphemeralHours != null && (config.scoringEphemeralHours as number) < 1) {
     logger.warn('scoringEphemeralHours must be >= 1, clamping to 1');
@@ -312,46 +415,54 @@ function validateScoringConfig(config: Record<string, unknown>): void {
   }
 }
 
-export function resolvePluginConfig(rawConfig: Record<string, unknown>): ResolvedPluginConfig {
-  const config = {
-    ...rawConfig,
-    backend: normalizeEnum(rawConfig.backend, BACKEND_VALUES, DEFAULT_PLUGIN_CONFIG.backend),
-    endpoint: normalizeString(rawConfig.endpoint, DEFAULT_PLUGIN_CONFIG.endpoint),
-    transport: normalizeEnum(rawConfig.transport, TRANSPORT_VALUES, DEFAULT_PLUGIN_CONFIG.transport),
-    groupId: normalizeString(rawConfig.groupId, DEFAULT_PLUGIN_CONFIG.groupId),
-    logLevel: normalizeEnum(rawConfig.logLevel, LOG_LEVEL_VALUES, DEFAULT_PLUGIN_CONFIG.logLevel),
-    autoCapture: normalizeBoolean(rawConfig.autoCapture, DEFAULT_PLUGIN_CONFIG.autoCapture),
-    autoRecall: normalizeBoolean(rawConfig.autoRecall, DEFAULT_PLUGIN_CONFIG.autoRecall),
-    recallMaxFacts: normalizeNumber(rawConfig.recallMaxFacts, DEFAULT_PLUGIN_CONFIG.recallMaxFacts, 1),
-    minPromptLength: normalizeNumber(rawConfig.minPromptLength, DEFAULT_PLUGIN_CONFIG.minPromptLength, 0),
-    scoringEnabled: normalizeBoolean(rawConfig.scoringEnabled, DEFAULT_PLUGIN_CONFIG.scoringEnabled),
-    scoringLegacyEnabled: normalizeBoolean(rawConfig.scoringLegacyEnabled, DEFAULT_PLUGIN_CONFIG.scoringLegacyEnabled),
-    scoringLegacyMode: normalizeBoolean(rawConfig.scoringLegacyMode, DEFAULT_PLUGIN_CONFIG.scoringLegacyMode),
-    scoringExplicitThreshold: normalizeNumber(rawConfig.scoringExplicitThreshold, DEFAULT_PLUGIN_CONFIG.scoringExplicitThreshold, 1),
-    scoringEphemeralThreshold: normalizeNumber(rawConfig.scoringEphemeralThreshold, DEFAULT_PLUGIN_CONFIG.scoringEphemeralThreshold, 0),
-    scoringEphemeralHours: normalizeNumber(rawConfig.scoringEphemeralHours, DEFAULT_PLUGIN_CONFIG.scoringEphemeralHours, 1),
-    scoringSilentDays: normalizeNumber(rawConfig.scoringSilentDays, DEFAULT_PLUGIN_CONFIG.scoringSilentDays, 1),
-    scoringCleanupHours: normalizeNumber(rawConfig.scoringCleanupHours, DEFAULT_PLUGIN_CONFIG.scoringCleanupHours, 1),
-    scoringNotifyExplicit: normalizeBoolean(rawConfig.scoringNotifyExplicit, DEFAULT_PLUGIN_CONFIG.scoringNotifyExplicit),
-    scoringAskBeforeDowngrade: normalizeBoolean(rawConfig.scoringAskBeforeDowngrade, DEFAULT_PLUGIN_CONFIG.scoringAskBeforeDowngrade),
-    scoringMinConversationLength: normalizeNumber(rawConfig.scoringMinConversationLength, DEFAULT_PLUGIN_CONFIG.scoringMinConversationLength, 0),
-    scoringMinMessageCount: normalizeNumber(rawConfig.scoringMinMessageCount, DEFAULT_PLUGIN_CONFIG.scoringMinMessageCount, 1),
-    scoringDefaultTier: normalizeEnum(rawConfig.scoringDefaultTier, ['explicit', 'silent', 'ephemeral'] as const, DEFAULT_PLUGIN_CONFIG.scoringDefaultTier),
-    axonDispatchEnabled: normalizeBoolean(rawConfig.axonDispatchEnabled, DEFAULT_PLUGIN_CONFIG.axonDispatchEnabled),
-    axonEnabled: normalizeBoolean(rawConfig.axonEnabled, DEFAULT_PLUGIN_CONFIG.axonEnabled),
-    axonSessionLogDir: normalizeString(rawConfig.axonSessionLogDir, DEFAULT_PLUGIN_CONFIG.axonSessionLogDir),
-    axonLookbackHours: normalizeNumber(rawConfig.axonLookbackHours, DEFAULT_PLUGIN_CONFIG.axonLookbackHours, 1),
-    axonEphemeralForgetDays: normalizeNumber(rawConfig.axonEphemeralForgetDays, DEFAULT_PLUGIN_CONFIG.axonEphemeralForgetDays, 1),
-    axonSilentDecayDays: normalizeNumber(rawConfig.axonSilentDecayDays, DEFAULT_PLUGIN_CONFIG.axonSilentDecayDays, 1),
-    axonBatchLimit: normalizeNumber(rawConfig.axonBatchLimit, DEFAULT_PLUGIN_CONFIG.axonBatchLimit, 1),
-    axonMinRepeatCount: normalizeNumber(rawConfig.axonMinRepeatCount, DEFAULT_PLUGIN_CONFIG.axonMinRepeatCount, 1),
-    axonDryRun: normalizeBoolean(rawConfig.axonDryRun, DEFAULT_PLUGIN_CONFIG.axonDryRun),
+function resolvePluginConfig(rawConfig: Record<string, unknown>): ResolvedPluginConfig {
+  const resolved: ResolvedPluginConfig = {
+    ...DEFAULT_PLUGIN_CONFIG,
+    backend: coerceEnum(rawConfig.backend, ['graphiti-mcp', 'auto'] as const, DEFAULT_PLUGIN_CONFIG.backend),
+    endpoint: coerceString(rawConfig.endpoint, DEFAULT_PLUGIN_CONFIG.endpoint),
+    transport: coerceOptionalEnum(rawConfig.transport, ['stdio', 'sse'] as const),
+    groupId: coerceString(rawConfig.groupId, DEFAULT_PLUGIN_CONFIG.groupId),
+    autoCapture: coerceBoolean(rawConfig.autoCapture, DEFAULT_PLUGIN_CONFIG.autoCapture),
+    autoRecall: coerceBoolean(rawConfig.autoRecall, DEFAULT_PLUGIN_CONFIG.autoRecall),
+    recallMaxFacts: coerceNumber(rawConfig.recallMaxFacts, DEFAULT_PLUGIN_CONFIG.recallMaxFacts, 1, 20),
+    minPromptLength: coerceNumber(rawConfig.minPromptLength, DEFAULT_PLUGIN_CONFIG.minPromptLength, 1),
+    scoringEnabled: coerceBoolean(rawConfig.scoringEnabled, DEFAULT_PLUGIN_CONFIG.scoringEnabled),
+    scoringLegacyEnabled: coerceBoolean(rawConfig.scoringLegacyEnabled, DEFAULT_PLUGIN_CONFIG.scoringLegacyEnabled),
+    scoringLegacyMode: coerceBoolean(rawConfig.scoringLegacyMode, DEFAULT_PLUGIN_CONFIG.scoringLegacyMode),
+    scoringExplicitThreshold: coerceNumber(rawConfig.scoringExplicitThreshold, DEFAULT_PLUGIN_CONFIG.scoringExplicitThreshold, 1, 10),
+    scoringEphemeralThreshold: coerceNumber(rawConfig.scoringEphemeralThreshold, DEFAULT_PLUGIN_CONFIG.scoringEphemeralThreshold, 0, 9),
+    scoringEphemeralHours: coerceNumber(rawConfig.scoringEphemeralHours, DEFAULT_PLUGIN_CONFIG.scoringEphemeralHours, 1, 168),
+    scoringSilentDays: coerceNumber(rawConfig.scoringSilentDays, DEFAULT_PLUGIN_CONFIG.scoringSilentDays, 1, 365),
+    scoringCleanupHours: coerceNumber(rawConfig.scoringCleanupHours, DEFAULT_PLUGIN_CONFIG.scoringCleanupHours, 1, 24),
+    scoringNotifyExplicit: coerceBoolean(rawConfig.scoringNotifyExplicit, DEFAULT_PLUGIN_CONFIG.scoringNotifyExplicit),
+    scoringAskBeforeDowngrade: coerceBoolean(rawConfig.scoringAskBeforeDowngrade, DEFAULT_PLUGIN_CONFIG.scoringAskBeforeDowngrade),
+    scoringMinConversationLength: coerceNumber(rawConfig.scoringMinConversationLength, DEFAULT_PLUGIN_CONFIG.scoringMinConversationLength, 0),
+    scoringMinMessageCount: coerceNumber(rawConfig.scoringMinMessageCount, DEFAULT_PLUGIN_CONFIG.scoringMinMessageCount, 1),
+    scoringDefaultTier: coerceEnum(rawConfig.scoringDefaultTier, ['explicit', 'silent', 'ephemeral'] as const, DEFAULT_PLUGIN_CONFIG.scoringDefaultTier),
+    scoringModel: {
+      provider: DEFAULT_PLUGIN_CONFIG.scoringModel.provider,
+      endpoint: DEFAULT_PLUGIN_CONFIG.scoringModel.endpoint,
+      timeoutMs: DEFAULT_PLUGIN_CONFIG.scoringModel.timeoutMs,
+    },
+    axonDispatchEnabled: coerceBoolean(rawConfig.axonDispatchEnabled, DEFAULT_PLUGIN_CONFIG.axonDispatchEnabled),
   };
 
-  return {
-    ...DEFAULT_PLUGIN_CONFIG,
-    ...config,
-  };
+  const rawScoringModel = rawConfig.scoringModel;
+  if (rawScoringModel != null && !isPlainObject(rawScoringModel)) {
+    console.warn('[nuron] scoringModel must be an object; falling back to defaults');
+  } else if (isPlainObject(rawScoringModel)) {
+    const scoringModel = rawScoringModel;
+    resolved.scoringModel = {
+      provider: coerceEnum(scoringModel.provider, ['llamacpp', 'openai', 'none'] as const, DEFAULT_PLUGIN_CONFIG.scoringModel.provider),
+      model: typeof scoringModel.model === 'string' && scoringModel.model.trim() ? scoringModel.model.trim() : undefined,
+      endpoint: coerceString(scoringModel.endpoint, DEFAULT_PLUGIN_CONFIG.scoringModel.endpoint),
+      apiKey: typeof scoringModel.apiKey === 'string' && scoringModel.apiKey.trim() ? scoringModel.apiKey : undefined,
+      timeoutMs: coerceNumber(scoringModel.timeoutMs, DEFAULT_PLUGIN_CONFIG.scoringModel.timeoutMs, 1000),
+    };
+  }
+
+  validateScoringConfig(resolved as unknown as Record<string, unknown>);
+  return resolved;
 }
 
 export default {
@@ -612,14 +723,11 @@ export default {
   },
 
   async register(api: any) {
-    const config = resolvePluginConfig(api?.pluginConfig ?? {});
-    configureLogger(api?.logger, config.logLevel);
+    const rawConfig = api?.pluginConfig ?? {};
+    const config = resolvePluginConfig(rawConfig);
 
     // Migrate settings from legacy plugin IDs
     migratePluginSettings(api, 'nuron');
-
-    // Validate and coerce scoring config
-    validateScoringConfig(config);
 
     // Safe logging - don't expose secrets
     const safeConfig = {
@@ -640,31 +748,13 @@ export default {
     let adapter: MemoryAdapter;
 
     try {
-      // Determine backend type
-      const backendType = config.backend || 'graphiti-mcp';
-
-      if (backendType === 'auto') {
-        logger.info('Auto-detecting Graphiti memory backend.');
-        // Map plugin config to BackendConfig shape for auto-detection
-        const backendConfig: Partial<BackendConfig> = {};
-        if (config.endpoint) (backendConfig as any).endpoint = config.endpoint;
-        if (config.transport) (backendConfig as any).transport = config.transport;
-        if (config.groupId) (backendConfig as any).groupId = config.groupId;
-        adapter = await adapterFactory.autoDetect(backendConfig);
-      } else if (backendType === 'graphiti-mcp') {
-        logger.info('Using Graphiti MCP backend.');
-        adapter = adapterFactory.create({
-          type: 'graphiti-mcp',
-          transport: config.transport || 'http',
-          endpoint: config.endpoint || 'http://localhost:8000/mcp/',
-          groupId: config.groupId || 'default'
-        });
+      if (config.backend === 'auto') {
+        console.log('[nuron] Auto-detecting Graphiti memory backend...');
       } else {
-        throw new Error(`Unknown backend type: ${backendType}`);
+        console.log('[nuron] Using Graphiti MCP backend...');
       }
 
-      // Initialize adapter
-      await adapter.initialize();
+      adapter = await createAdapterFromConfig(config as unknown as Record<string, unknown>);
 
       // Verify connection
       const health = await adapter.healthCheck();

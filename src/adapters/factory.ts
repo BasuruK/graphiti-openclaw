@@ -15,6 +15,21 @@ import { getLogger } from '../logger.js';
 
 const logger = getLogger('adapter-factory');
 
+function inferGraphitiTransport(endpoint?: string): 'sse' | undefined {
+  if (!endpoint) {
+    return undefined;
+  }
+
+  return 'sse';
+}
+
+function resolveGraphitiTransport(
+  transport?: 'stdio' | 'sse',
+  endpoint?: string
+): 'stdio' | 'sse' | undefined {
+  return transport ?? inferGraphitiTransport(endpoint);
+}
+
 /**
  * Adapter Factory
  *
@@ -68,7 +83,7 @@ export class AdapterFactory {
       logger.info('Attempting configured Graphiti MCP connection.');
       const adapter = createGraphitiMCPAdapter({
         type: 'graphiti-mcp',
-        transport: configuredTransport || 'http',
+        transport: resolveGraphitiTransport(configuredTransport, configuredEndpoint),
         endpoint: configuredEndpoint,
         groupId: configuredGroupId || 'default',
       });
@@ -95,7 +110,7 @@ export class AdapterFactory {
 
       const adapter = createGraphitiMCPAdapter({
         type: 'graphiti-mcp',
-        transport: transport || 'http',
+        transport: resolveGraphitiTransport(transport, graphitiEndpoint),
         endpoint: graphitiEndpoint,
         groupId: process.env.GRAPHITI_GROUP_ID || 'default',
       });
@@ -205,8 +220,11 @@ export async function createAdapterFromConfig(
         case 'graphiti-mcp': {
           const adapter = adapterFactory.create({
             type: 'graphiti-mcp',
-            transport: (config.transport as 'stdio' | 'sse' | 'http') || 'http',
-            endpoint: (config.endpoint as string) || 'http://localhost:8000/mcp/',
+            transport: resolveGraphitiTransport(
+              config.transport as 'stdio' | 'sse' | undefined,
+              config.endpoint as string | undefined
+            ),
+            endpoint: (config.endpoint as string) || 'http://localhost:8000/sse',
             groupId: (config.groupId as string) || 'default',
           });
           await adapter.initialize();
@@ -215,7 +233,10 @@ export async function createAdapterFromConfig(
         case 'auto':
           return adapterFactory.autoDetect({
             endpoint: config.endpoint as string | undefined,
-            transport: (config.transport as 'stdio' | 'sse' | 'http') || 'http',
+            transport: resolveGraphitiTransport(
+              config.transport as 'stdio' | 'sse' | undefined,
+              config.endpoint as string | undefined
+            ),
             groupId: (config.groupId as string) || 'default',
           });
         case 'neo4j':
@@ -227,7 +248,10 @@ export async function createAdapterFromConfig(
           logger.warn(`Unknown backend string '${backend}', falling back to auto-detect.`);
           return adapterFactory.autoDetect({
             endpoint: config.endpoint as string | undefined,
-            transport: (config.transport as 'stdio' | 'sse' | 'http') || 'http',
+            transport: resolveGraphitiTransport(
+              config.transport as 'stdio' | 'sse' | undefined,
+              config.endpoint as string | undefined
+            ),
             groupId: (config.groupId as string) || 'default',
           });
       }
@@ -244,7 +268,7 @@ export async function createAdapterFromConfig(
     logger.warn('Using legacy Graphiti MCP configuration.');
     const adapter = adapterFactory.create({
       type: 'graphiti-mcp',
-      transport: 'http',
+      transport: resolveGraphitiTransport(undefined, config.endpoint as string),
       endpoint: config.endpoint as string,
       groupId: (config.groupId as string) || 'default',
     });
@@ -263,7 +287,10 @@ export async function createAdapterFromConfig(
   // Try auto-detection
   return adapterFactory.autoDetect({
     endpoint: config.endpoint as string | undefined,
-    transport: (config.transport as 'stdio' | 'sse' | 'http') || 'http',
+    transport: resolveGraphitiTransport(
+      config.transport as 'stdio' | 'sse' | undefined,
+      config.endpoint as string | undefined
+    ),
     groupId: (config.groupId as string) || 'default',
   });
 }

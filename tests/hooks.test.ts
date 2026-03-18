@@ -20,8 +20,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     getStats: vi.fn(),
     cleanup: vi.fn().mockResolvedValue({ deleted: 0, upgraded: 0 }),
     getUnconsolidatedMemories: vi.fn().mockResolvedValue([]),
-    storeConsolidation: vi.fn().mockResolvedValue(undefined),
-    connect: vi.fn().mockResolvedValue(undefined),
+    storeConsolidation: vi.fn().mockResolvedValue({ requested: 0, created: 0, failures: [] }),
     getBackendType: vi.fn().mockReturnValue('test'),
     ...overrides,
   } as unknown as MemoryAdapter;
@@ -55,10 +54,82 @@ describe('registerHooks', () => {
     const beforeAgentStart = api.handlers.get('before_agent_start')!;
     const result = await beforeAgentStart({ prompt: 'What do you remember about my editor setup?' });
 
-    expect(result.prependContext).toContain('<memory>');
+    expect(result.prependContext).toContain('<system_memory_instructions>');
+    expect(result.prependSystemContext).toBe(result.prependContext);
     expect(result.prependContext).toContain('No relevant memories found.');
     expect(result.prependContext).not.toContain('<system_memory_instructions>');
     expect(result.prependSystemContext).toContain('<system_memory_instructions>');
+  });
+
+  it('keeps short explicit user memories for scoring', async () => {
+    const adapter = createAdapter({
+      store: vi.fn().mockResolvedValue('memory-43'),
+    });
+    const api = createApi();
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: true,
+      minPromptLength: 1,
+      recallMaxFacts: 3,
+      scoringEnabled: true,
+    });
+
+    await api.handlers.get('agent_end')({
+      sessionId: 'session-short-explicit',
+      messages: [
+        { role: 'user', content: 'remember pnpm' },
+      ],
+    });
+
+    expect(adapter.store).toHaveBeenCalledTimes(1);
+    expect(adapter.store).toHaveBeenCalledWith(
+      expect.stringContaining('user: remember pnpm'),
+      expect.objectContaining({ sessionId: 'session-short-explicit' })
+    );
+  });
+
+  it('dispatches Axon triggers on heartbeat even when scoring is disabled', async () => {
+    const adapter = createAdapter();
+    const api = createApi() as ReturnType<typeof createApi> & { dispatchAxonTrigger: ReturnType<typeof vi.fn> };
+    api.dispatchAxonTrigger = vi.fn().mockResolvedValue(undefined);
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: false,
+      scoringEnabled: false,
+      scoringCleanupHours: 0,
+      axonDispatchEnabled: true,
+    });
+
+    await api.handlers.get('heartbeat')();
+
+    expect(api.dispatchAxonTrigger).toHaveBeenCalledTimes(1);
+    expect(adapter.cleanup).not.toHaveBeenCalled();
+  });
+
+  it('invokes the Axon dispatch hook with its original owner binding', async () => {
+    const adapter = createAdapter();
+    const api = createApi() as ReturnType<typeof createApi> & { nuron: { invocations: number; dispatchAxonTrigger: (payload: unknown) => Promise<void> } };
+    api.nuron = {
+      invocations: 0,
+      dispatchAxonTrigger: vi.fn(async function (this: { invocations: number }, _payload: unknown) {
+        this.invocations += 1;
+      }),
+    };
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: false,
+      scoringEnabled: false,
+      scoringCleanupHours: 0,
+      axonDispatchEnabled: true,
+    });
+
+    await api.handlers.get('heartbeat')();
+
+    expect(api.nuron.dispatchAxonTrigger).toHaveBeenCalledTimes(1);
+    expect(api.nuron.invocations).toBe(1);
   });
 
   it('stores scored conversations during agent_end auto-capture', async () => {

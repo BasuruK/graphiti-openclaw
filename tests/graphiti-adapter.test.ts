@@ -1,167 +1,125 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { GraphitiMCPAdapter, normalizeGraphitiMCPConfig } from '../src/adapters/graphiti-adapter.js';
+const mocks = vi.hoisted(() => ({
+  connectMock: vi.fn().mockResolvedValue(undefined),
+  closeMock: vi.fn().mockResolvedValue(undefined),
+  clientCallToolMock: vi.fn(),
+  sseTransportMock: vi.fn((url: URL) => ({ url })),
+  stdioTransportMock: vi.fn(),
+}));
 
-describe('normalizeGraphitiMCPConfig', () => {
-  it('defaults HTTP transport to the /mcp/ endpoint', () => {
-    const config = normalizeGraphitiMCPConfig({
-      type: 'graphiti-mcp',
-      transport: 'http',
-      groupId: 'default',
-    });
+vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
+  Client: vi.fn().mockImplementation(() => ({
+    connect: mocks.connectMock,
+    close: mocks.closeMock,
+    callTool: mocks.clientCallToolMock,
+  })),
+}));
 
-    expect(config.endpoint).toBe('http://localhost:8000/mcp/');
+vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
+  StdioClientTransport: mocks.stdioTransportMock,
+}));
+
+vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
+  SSEClientTransport: mocks.sseTransportMock,
+}));
+
+import { GraphitiMCPAdapter } from '../src/adapters/graphiti-adapter.js';
+
+describe('GraphitiMCPAdapter', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it('migrates legacy /sse endpoints when using HTTP transport', () => {
-    const config = normalizeGraphitiMCPConfig({
-      type: 'graphiti-mcp',
-      transport: 'http',
-      endpoint: 'http://localhost:8000/sse',
-      groupId: 'default',
-    });
-
-    expect(config.endpoint).toBe('http://localhost:8000/mcp/');
-  });
-
-  it('preserves SSE endpoints for legacy servers', () => {
-    const config = normalizeGraphitiMCPConfig({
+  it('normalizes SSE endpoints onto the /sse path', async () => {
+    const adapter = new GraphitiMCPAdapter({
       type: 'graphiti-mcp',
       transport: 'sse',
-      endpoint: 'http://localhost:8000/sse',
+      endpoint: 'http://localhost:8000/mcp/',
       groupId: 'default',
     });
 
-    expect(config.endpoint).toBe('http://localhost:8000/sse');
+    await adapter.initialize();
+
+    expect(mocks.sseTransportMock).toHaveBeenCalledTimes(1);
+    const normalizedUrl = mocks.sseTransportMock.mock.calls[0][0] as URL;
+    expect(normalizedUrl.toString()).toBe('http://localhost:8000/sse');
   });
 
-  it('unwraps node search responses returned as an envelope object', async () => {
-    const adapter = new GraphitiMCPAdapter({
-      type: 'graphiti-mcp',
-      transport: 'http',
-      groupId: 'default',
-    });
+  it('surfaces primitive search failures and filters recall results by tier', async () => {
+    const adapter = new GraphitiMCPAdapter({ type: 'graphiti-mcp', groupId: 'default' });
 
-    vi.spyOn(adapter as any, 'callTool').mockResolvedValue({
-      message: 'Nodes retrieved successfully',
-      nodes: [
-        {
-          uuid: 'node-1',
-          name: 'Preference',
-          summary: 'User prefers concise responses.',
-          valid_at: '2026-03-16T00:00:00Z',
-        },
-      ],
-    });
+    (adapter as any).callTool = vi.fn().mockResolvedValueOnce('backend offline');
+    await expect(adapter.recall('hello', { limit: 5 })).rejects.toThrow('backend offline');
 
-    const results = await adapter.recall('concise', { limit: 5, tier: 'all' });
+    (adapter as any).callTool = vi.fn().mockResolvedValueOnce([
+      {
+        uuid: 'mem-explicit',
+        summary: JSON.stringify({
+          content: 'Important preference',
+          memory: { tier: 'explicit', source: 'user_explicit', score: 9 },
+        }),
+      },
+      {
+        uuid: 'mem-silent',
+        summary: JSON.stringify({
+          content: 'Background fact',
+          memory: { tier: 'silent', source: 'auto_capture', score: 6 },
+        }),
+      },
+    ]);
 
-    expect(results).toHaveLength(1);
-    expect(results[0].content).toContain('User prefers concise responses.');
-  });
-
-  it('unwraps episode search responses returned as an envelope object', async () => {
-    const adapter = new GraphitiMCPAdapter({
-      type: 'graphiti-mcp',
-      transport: 'http',
-      groupId: 'default',
-    });
-
-    vi.spyOn(adapter as any, 'callTool').mockResolvedValue({
-      message: 'Episodes retrieved successfully',
-      episodes: [
-        {
-          uuid: 'episode-1',
-          name: 'Episode 1',
-          content: '{"content":"Remember Vim mode","memory":{"tier":"explicit","score":9}}',
-          created_at: '2026-03-16T00:00:00Z',
-        },
-      ],
-    });
-
-    const results = await adapter.list(10, 'all');
+    const results = await adapter.recall('hello', { limit: 5, tier: 'explicit' });
 
     expect(results).toHaveLength(1);
-    expect(results[0].content).toBe('Remember Vim mode');
+    expect(results[0].id).toBe('mem-explicit');
     expect(results[0].metadata.tier).toBe('explicit');
   });
 
-  it('rehydrates persisted metadata fields from stored episode JSON', async () => {
-    const adapter = new GraphitiMCPAdapter({
-      type: 'graphiti-mcp',
-      transport: 'http',
-      groupId: 'default',
+  it('returns partial edge write details and preserves source ids during consolidation', async () => {
+    const adapter = new GraphitiMCPAdapter({ type: 'graphiti-mcp', groupId: 'default' });
+
+    (adapter as any).store = vi.fn().mockResolvedValue('insight-1');
+    (adapter as any).callTool = vi.fn().mockImplementation(async (name: string, args: Record<string, unknown>) => {
+      if (
+        name === 'add_memory' &&
+        typeof args.episode_body === 'string' &&
+        args.episode_body.includes('mem-2 SUPPORTS mem-4')
+      ) {
+        throw new Error('edge failed');
+      }
+
+      return {};
     });
 
-    vi.spyOn(adapter as any, 'callTool').mockResolvedValue({
-      message: 'Episodes retrieved successfully',
-      episodes: [
-        {
-          uuid: 'episode-2',
-          name: 'Episode 2',
-          content: JSON.stringify({
-            content: 'Working context: build is failing in CI today.',
-            memory: {
-              tier: 'ephemeral',
-              score: 3,
-              createdAt: '2026-03-16T00:00:00Z',
-              lastReinforced: '2026-03-16T01:00:00Z',
-              reinforcementCount: 2,
-              memoryKind: 'working_context',
-              disposition: 'ephemeral',
-              sourceLog: {
-                path: '/tmp/openclaw/2026-03-16.md',
-                date: '2026-03-16',
-                excerpt: 'CI is still red today.',
-              },
-            },
-          }),
-          created_at: '2026-03-16T00:00:00Z',
-        },
-      ],
-    });
-
-    const results = await adapter.list(10, 'all');
-
-    expect(results).toHaveLength(1);
-    expect(results[0].metadata.reinforcementCount).toBe(2);
-    expect(results[0].metadata.memoryKind).toBe('working_context');
-    expect(results[0].metadata.disposition).toBe('ephemeral');
-    expect(results[0].metadata.sourceLog?.path).toContain('/tmp/openclaw/2026-03-16.md');
-    expect(results[0].metadata.lastReinforced?.toISOString()).toBe('2026-03-16T01:00:00.000Z');
-  });
-
-  it('creates graph edges through the add_edge tool', async () => {
-    const adapter = new GraphitiMCPAdapter({
-      type: 'graphiti-mcp',
-      transport: 'http',
-      groupId: 'default',
-    });
-
-    const callTool = vi.spyOn(adapter as any, 'callTool').mockResolvedValue({});
-    await adapter.connect('mem-1', 'mem-2', 'relates to');
-
-    expect(callTool).toHaveBeenCalledWith('add_edge', {
-      group_id: 'default',
-      from_node_uuid: 'mem-1',
-      to_node_uuid: 'mem-2',
-      label: 'RELATES_TO',
-    });
-  });
-
-  it('throws Graphiti error responses instead of treating them like arrays', async () => {
-    const adapter = new GraphitiMCPAdapter({
-      type: 'graphiti-mcp',
-      transport: 'http',
-      groupId: 'default',
-    });
-
-    vi.spyOn(adapter as any, 'callTool').mockResolvedValue({
-      error: 'Graphiti service not initialized',
-    });
-
-    await expect(adapter.recall('test', { limit: 5, tier: 'all' })).rejects.toThrow(
-      'Graphiti service not initialized'
+    const result = await adapter.storeConsolidation(
+      ['mem-1', 'mem-2'],
+      'Merged summary',
+      'Shared pattern',
+      [
+        { fromId: 'mem-1', toId: 'mem-3', relationship: 'RELATES_TO' },
+        { fromId: 'mem-2', toId: 'mem-4', relationship: 'SUPPORTS' },
+      ]
     );
+
+    expect(result.requested).toBe(2);
+    expect(result.created).toBe(1);
+    expect(result.failures).toEqual([
+      expect.objectContaining({
+        fromId: 'mem-2',
+        toId: 'mem-4',
+        relationship: 'SUPPORTS',
+        error: 'edge failed',
+      }),
+    ]);
+    expect((adapter as any).callTool).toHaveBeenCalledWith(
+      'add_memory',
+      expect.objectContaining({
+        group_id: 'default',
+        episode_body: expect.stringContaining('mem-1 RELATES_TO mem-3'),
+      })
+    );
+    expect((adapter as any).metadataPatches.get('mem-1')).toEqual(expect.objectContaining({ consolidated: true }));
+    expect((adapter as any).metadataPatches.get('mem-2')).toEqual(expect.objectContaining({ consolidated: true }));
   });
 });

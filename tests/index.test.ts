@@ -1,74 +1,94 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { resolvePluginConfig } from '../src/index.js';
+const mocks = vi.hoisted(() => ({
+  registerToolsMock: vi.fn(),
+  registerHooksMock: vi.fn(),
+  createAdapterFromConfigMock: vi.fn(),
+}));
 
-describe('resolvePluginConfig', () => {
-  it('applies runtime defaults when OpenClaw omits plugin settings', () => {
-    const config = resolvePluginConfig({});
+vi.mock('../src/tools.js', () => ({
+  registerTools: mocks.registerToolsMock,
+}));
 
-    expect(config.transport).toBe('http');
-    expect(config.endpoint).toBe('http://localhost:8000/mcp/');
-    expect(config.logLevel).toBe('warn');
-    expect(config.autoCapture).toBe(true);
-    expect(config.autoRecall).toBe(true);
-    expect(config.scoringEnabled).toBe(true);
-    expect(config.axonEnabled).toBe(true);
-    expect(config.axonLookbackHours).toBe(24);
+vi.mock('../src/hooks.js', () => ({
+  registerHooks: mocks.registerHooksMock,
+}));
+
+vi.mock('../src/adapters/factory.js', () => ({
+  createAdapterFromConfig: mocks.createAdapterFromConfigMock,
+}));
+
+import plugin from '../src/index.js';
+
+describe('plugin register', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.createAdapterFromConfigMock.mockResolvedValue({
+      healthCheck: vi.fn().mockResolvedValue({ healthy: true, backend: 'test' }),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+    });
   });
 
-  it('preserves explicit user overrides', () => {
-    const config = resolvePluginConfig({
+  it('normalizes plugin config before creating the adapter and wiring hooks', async () => {
+    const api = {
+      pluginConfig: {
+        backend: 'invalid-backend',
+        autoCapture: 'false',
+        autoRecall: '1',
+        recallMaxFacts: '999',
+        scoringEphemeralThreshold: -1,
+        scoringExplicitThreshold: 0,
+        scoringModel: {
+          provider: 'none',
+          timeoutMs: '250',
+        },
+      },
+      onShutdown: vi.fn(),
+    };
+
+    await plugin.register(api);
+
+    expect(mocks.createAdapterFromConfigMock).toHaveBeenCalledWith(expect.objectContaining({
+      backend: 'graphiti-mcp',
       autoCapture: false,
-      autoRecall: false,
-      scoringEnabled: false,
-      endpoint: 'http://localhost:8000/sse',
-      transport: 'sse',
-      logLevel: 'debug',
-      axonDryRun: true,
-    });
-
-    expect(config.autoCapture).toBe(false);
-    expect(config.autoRecall).toBe(false);
-    expect(config.scoringEnabled).toBe(false);
-    expect(config.endpoint).toBe('http://localhost:8000/sse');
-    expect(config.transport).toBe('sse');
-    expect(config.logLevel).toBe('debug');
-    expect(config.axonDryRun).toBe(true);
+      autoRecall: true,
+      recallMaxFacts: 20,
+      scoringEphemeralThreshold: 0,
+      scoringExplicitThreshold: 1,
+      scoringModel: expect.objectContaining({
+        provider: 'none',
+        timeoutMs: 1000,
+      }),
+    }));
+    expect(mocks.registerToolsMock).toHaveBeenCalledWith(
+      api,
+      expect.any(Object),
+      expect.objectContaining({
+        autoCapture: false,
+        autoRecall: true,
+        scoringEphemeralThreshold: 0,
+        scoringExplicitThreshold: 1,
+      })
+    );
+    expect(mocks.registerHooksMock).toHaveBeenCalled();
   });
 
-  it('normalizes enum, boolean, and numeric overrides before runtime use', () => {
-    const config = resolvePluginConfig({
-      backend: 'unsupported',
-      transport: 'bogus',
-      logLevel: 'verbose',
-      autoCapture: 'false',
-      autoRecall: 0,
-      scoringEnabled: '1',
-      recallMaxFacts: '0',
-      minPromptLength: '12',
-      scoringMinMessageCount: '2',
-      scoringExplicitThreshold: '9',
-      scoringEphemeralThreshold: '-2',
-      axonDispatchEnabled: 'yes',
-      axonEnabled: '0',
-      axonLookbackHours: '0',
-      axonBatchLimit: '3',
-    });
+  it('falls back to default scoringModel when the config value is malformed', async () => {
+    const api = {
+      pluginConfig: {
+        scoringModel: ['invalid'],
+      },
+      onShutdown: vi.fn(),
+    };
 
-    expect(config.backend).toBe('graphiti-mcp');
-    expect(config.transport).toBe('http');
-    expect(config.logLevel).toBe('warn');
-    expect(config.autoCapture).toBe(false);
-    expect(config.autoRecall).toBe(false);
-    expect(config.scoringEnabled).toBe(true);
-    expect(config.recallMaxFacts).toBe(1);
-    expect(config.minPromptLength).toBe(12);
-    expect(config.scoringMinMessageCount).toBe(2);
-    expect(config.scoringExplicitThreshold).toBe(9);
-    expect(config.scoringEphemeralThreshold).toBe(0);
-    expect(config.axonDispatchEnabled).toBe(true);
-    expect(config.axonEnabled).toBe(false);
-    expect(config.axonLookbackHours).toBe(1);
-    expect(config.axonBatchLimit).toBe(3);
+    await plugin.register(api);
+
+    expect(mocks.createAdapterFromConfigMock).toHaveBeenCalledWith(expect.objectContaining({
+      scoringModel: expect.objectContaining({
+        provider: 'none',
+        endpoint: 'http://localhost:8080',
+        timeoutMs: 10000,
+      }),
+    }));
   });
 });

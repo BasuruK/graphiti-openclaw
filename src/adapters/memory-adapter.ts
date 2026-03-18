@@ -30,6 +30,8 @@ export interface SourceLogReference {
  * Memory metadata stored with each memory
  */
 export interface MemoryMetadata {
+  /** Optional display name */
+  name?: string;
   /** Memory importance tier */
   tier: 'explicit' | 'silent' | 'ephemeral';
   /** Importance score 0-10 */
@@ -136,7 +138,7 @@ export interface HealthResult {
 export interface GraphitiMCPConfig {
   type: 'graphiti-mcp';
   /** MCP transport type */
-  transport: 'stdio' | 'sse' | 'http';
+  transport?: 'stdio' | 'sse';
   /** For stdio: command to run (e.g., 'uv', 'python') */
   command?: string;
   /** For stdio: command arguments */
@@ -174,6 +176,22 @@ export interface SQLiteConfig {
 
 export type BackendConfig = GraphitiMCPConfig | FalkorDBConfig | SQLiteConfig;
 
+export interface ConsolidationConnection {
+  fromId: string;
+  toId: string;
+  relationship: string;
+}
+
+export interface ConsolidationFailure extends ConsolidationConnection {
+  error: string;
+}
+
+export interface ConsolidationResult {
+  requested: number;
+  created: number;
+  failures: ConsolidationFailure[];
+}
+
 /**
  * Core memory adapter interface
  * All memory backends must implement this interface
@@ -196,6 +214,11 @@ export interface MemoryAdapter {
    * @returns Memory ID
    */
   store(content: string, metadata: Partial<MemoryMetadata>): Promise<string>;
+
+  /**
+   * Apply a metadata-only update while preserving the original memory identity.
+   */
+  patchMetadata?(id: string, metadata: Partial<MemoryMetadata>): Promise<void>;
 
   /**
    * Recall memories based on query
@@ -280,8 +303,8 @@ export interface MemoryAdapter {
     sourceIds: string[],
     summary: string,
     insight: string,
-    connections: { fromId: string; toId: string; relationship: string }[]
-  ): Promise<void>;
+    connections: ConsolidationConnection[]
+  ): Promise<ConsolidationResult>;
 
   /**
    * Create a direct semantic relationship between two stored memories.

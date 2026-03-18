@@ -106,6 +106,35 @@ const MEMORY_MD_PATH = path.resolve(__dirname, '../MEMORY.md');
 
 let memoryInstructionsCache: { mtimeMs: number; value: string } | null = null;
 
+function hasExplicitMemoryMarker(content: string): boolean {
+  const lowerContent = content.toLowerCase();
+  return [
+    'remember',
+    'dont forget',
+    "don't forget",
+    'important',
+    'note that',
+    'keep in mind',
+    'save this',
+    'store this',
+  ].some((marker) => lowerContent.includes(marker));
+}
+
+function isAssistantFillerResponse(content: string): boolean {
+  const normalized = content.toLowerCase().trim();
+  return [
+    'ok',
+    'okay',
+    'sure',
+    'got it',
+    'understood',
+    'i understand',
+    'i will keep that in mind',
+    'i will remember that',
+    'i will keep that in mind for future coding help.',
+  ].includes(normalized);
+}
+
 function getCachedMemoryInstructions(): string {
   try {
     if (!fs.existsSync(MEMORY_MD_PATH)) {
@@ -201,12 +230,12 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
       logger.debug(`Auto-recall found ${results ? results.length : 0} relevant memories.`);
 
       const memoryInstructions = getCachedMemoryInstructions();
+      const prependedContext = `<memory>\nRelevant memories:\n${contextBlock}\n</memory>\n\n<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`;
 
-      // Keep recall context in user-visible prepended context, but keep classification
-      // instructions in system-only context so they do not appear in chat history.
+      // Return both keys for backwards compatibility with OpenClaw host variants.
       return {
-        prependContext: `<memory>\nRelevant memories:\n${contextBlock}\n</memory>`,
-        prependSystemContext: `<system_memory_instructions>\n${memoryInstructions}\n</system_memory_instructions>`
+        prependContext: prependedContext,
+        prependSystemContext: prependedContext,
       };
     } catch (err) {
       logger.error(`Auto-recall error: ${err instanceof Error ? err.message : String(err)}`);
@@ -222,7 +251,56 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     if (!messages || !Array.isArray(messages) || messages.length === 0) return;
 
     try {
-      const conversationSegments = extractConversationSegments(messages);
+      // Extract conversation from messages (chronological order, take last N)
+      const conversationSegments: { content: string; role: 'user' | 'assistant' }[] = [];
+
+      // Iterate messages in chronological order (oldest→newest)
+      // Start from the end to respect MAX_CAPTURE_MESSAGES limit
+      const startIdx = Math.max(0, messages.length - MAX_CAPTURE_MESSAGES);
+
+      for (let i = startIdx; i < messages.length; i++) {
+        const msg = messages[i];
+        if (!msg || typeof msg !== 'object') continue;
+
+        const msgObj = msg as Record<string, any>;
+        const role = msgObj.role;
+
+        if (role !== 'user' && role !== 'assistant') continue;
+
+        // Extract text content
+        let text = '';
+        const content = msgObj.content;
+        if (typeof content === 'string') {
+          text = content;
+        } else if (Array.isArray(content)) {
+          for (const block of content) {
+            if (block && typeof block === 'object' && 'type' in block && block.type === 'text') {
+              text += ' ' + (block.text || '');
+            }
+          }
+        }
+
+        const sanitized = text.trim();
+        if (!sanitized) continue;
+
+        if (
+          sanitized.includes('Relevant memories:') ||
+          sanitized.includes('system_memory_instructions') ||
+          sanitized.includes('<memory>') ||
+          sanitized.includes('<relevant-memories>')
+        ) {
+          continue;
+        }
+
+        if (role === 'assistant' && isAssistantFillerResponse(sanitized)) continue;
+
+        if (sanitized.length < MIN_MESSAGE_LENGTH && !hasExplicitMemoryMarker(sanitized)) continue;
+
+        conversationSegments.push({
+          content: sanitized.slice(0, 500),
+          role: role as 'user' | 'assistant'
+        });
+      }
 
       if (conversationSegments.length === 0) {
         logger.debug('Auto-capture found no meaningful messages to capture.');
@@ -255,8 +333,6 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
 
   // Register heartbeat/cleanup hook
   api.on('heartbeat', async () => {
-    if (!scoringConfig.enabled) return;
-
     // Throttle: only run maintenance every cleanupIntervalHours
     const intervalMs = (scoringConfig.cleanupIntervalHours ?? DEFAULT_SCORING_CONFIG.cleanupIntervalHours) * 3600000;
     const now = Date.now();
@@ -265,7 +341,10 @@ export function registerHooks(api: any, adapter: MemoryAdapter, config: any) {
     logger.info('Running scheduled memory maintenance.');
 
     // Legacy Scorers: Only run if explicitly enabled (opt-in)
-    if (config.scoringLegacyEnabled === true || config.scoringLegacyMode === true) {
+    if (
+      scoringConfig.enabled &&
+      (config.scoringLegacyEnabled === true || config.scoringLegacyMode === true)
+    ) {
       // Cleanup expired ephemeral memories (isolated)
       try {
         const cleanup = await scorer.cleanupExpiredMemories();
@@ -342,18 +421,20 @@ async function dispatchAxonTrigger(api: any, config: any): Promise<boolean> {
     timestamp: Date.now()
   };
 
-  const dispatchHook =
+  const dispatchTarget =
     typeof api?.dispatchAxonTrigger === 'function'
-      ? api.dispatchAxonTrigger
+      ? api
       : typeof api?.nuron?.dispatchAxonTrigger === 'function'
-        ? api.nuron.dispatchAxonTrigger
+        ? api.nuron
         : undefined;
+
+  const dispatchHook = dispatchTarget?.dispatchAxonTrigger;
 
   if (!dispatchHook) {
     logger.warn('Axon dispatch is enabled but no supported dispatch hook is available; skipping trigger.');
     return false;
   }
 
-  await Promise.resolve(dispatchHook(payload));
+  await Promise.resolve(dispatchHook.apply(dispatchTarget, [payload]));
   return true;
 }

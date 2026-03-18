@@ -61,6 +61,22 @@ describe('MemoryScorer', () => {
     expect(result.reasoning).toContain('skipping storage');
   });
 
+  it('recommends storing durable user preferences instead of skipping them', async () => {
+    const adapter = createAdapter();
+    const scorer = new MemoryScorer(adapter);
+
+    const result = await scorer.scoreConversation([
+      {
+        role: 'user',
+        content: 'Please remember that I prefer Vim keybindings in VS Code for daily development work and project navigation.',
+      },
+    ]);
+
+    expect(result.tier).toMatch(/^(silent|explicit)$/);
+    expect(result.recommendedAction).not.toBe('skip');
+    expect(['store_silent', 'store_explicit']).toContain(result.recommendedAction);
+  });
+
   it('rejects invalid scoring thresholds', () => {
     const adapter = createAdapter();
 

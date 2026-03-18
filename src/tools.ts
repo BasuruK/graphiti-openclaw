@@ -15,12 +15,7 @@
  */
 
 import { Type } from '@sinclair/typebox';
-import type { MemoryAdapter } from './adapters/memory-adapter.js';
-import { applyAxonPlan, collectAxonDailySources, type AxonPlanOperation, type AxonRuntimeConfig } from './axon.js';
-import { getLogger } from './logger.js';
-import { reinforceMemories } from './memory-maintenance.js';
-
-const logger = getLogger('tools');
+import type { ConsolidationConnection, MemoryAdapter } from './adapters/memory-adapter.js';
 
 /** Valid memory tier values */
 const VALID_TIERS = ['explicit', 'silent', 'ephemeral', 'all'] as const;
@@ -157,14 +152,12 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
           tier: storageTier,
           score: storageTier === 'explicit' ? 9 : storageTier === 'silent' ? 6 : 3,
           source: 'user_explicit',
-          disposition: storageTier,
-          summary: params.content,
-          memoryKind: 'fact',
+          name: params.name,
         });
 
         return {
-          content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${storageTier}` }],
-          details: { id, tier: storageTier }
+          content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${storageTier}${params.name ? `\nName: ${params.name}` : ''}` }],
+          details: { id, tier: storageTier, name: params.name }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -496,7 +489,7 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
       sourceIds: string[];
       summary: string;
       insight: string;
-      connections: { fromId: string; toId: string; relationship: string }[];
+      connections: ConsolidationConnection[];
     }) {
       try {
         // Validation: Ensure sourceIds is a non-empty array
@@ -507,27 +500,72 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
           };
         }
 
-        const hasEmptyConnections = Array.isArray(params.connections) && params.connections.length === 0;
+        const summary = params.summary.trim();
+        if (!summary) {
+          return {
+            content: [{ type: 'text', text: 'Error: summary must not be blank.' }],
+            isError: true
+          };
+        }
+
+        const insight = params.insight.trim();
+        if (!insight) {
+          return {
+            content: [{ type: 'text', text: 'Error: insight must not be blank.' }],
+            isError: true
+          };
+        }
+
+        const connections = Array.isArray(params.connections) ? params.connections : [];
+        const hasEmptyConnections = connections.length === 0;
+
+        for (const connection of connections) {
+          const fromId = connection.fromId?.trim();
+          const toId = connection.toId?.trim();
+          const relationship = connection.relationship?.trim();
+
+          if (!fromId || !toId) {
+            return {
+              content: [{ type: 'text', text: 'Error: each connection must include non-empty fromId and toId values.' }],
+              isError: true
+            };
+          }
+
+          if (!relationship || !/^[A-Z0-9_]+$/.test(relationship)) {
+            return {
+              content: [{ type: 'text', text: 'Error: each connection.relationship must be a non-empty uppercase token like RELATES_TO.' }],
+              isError: true
+            };
+          }
+        }
+
         const warning = hasEmptyConnections
           ? 'Warning: no semantic connections were provided, so the consolidation created an insight without graph edges.'
           : undefined;
 
-        await adapter.storeConsolidation(
+        const result = await adapter.storeConsolidation(
           params.sourceIds,
-          params.summary,
-          params.insight,
-          params.connections
+          summary,
+          insight,
+          connections
         );
+
+        const failureWarning = result.failures.length > 0
+          ? `Warning: ${result.failures.length} semantic connection(s) failed to persist.`
+          : undefined;
 
         return {
           content: [{
             type: 'text',
-            text: `Deprecated: prefer memory_axon_apply_plan for daily Axon maintenance.\nConsolidation successful.\nProcessed ${params.sourceIds.length} memories.\nCreated ${params.connections.length} semantic connections.${warning ? `\n${warning}` : ''}`
+            text: `Consolidation successful.\nProcessed ${params.sourceIds.length} memories.\nCreated ${result.created} of ${result.requested} semantic connections.${warning ? `\n${warning}` : ''}${failureWarning ? `\n${failureWarning}` : ''}`
           }],
           details: {
             processed: params.sourceIds.length,
-            connections: params.connections.length,
-            ...(warning ? { warning } : {})
+            connections: result.created,
+            requestedConnections: result.requested,
+            failures: result.failures,
+            ...(warning ? { warning } : {}),
+            ...(failureWarning ? { failureWarning } : {})
           }
         };
       } catch (err) {

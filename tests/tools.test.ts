@@ -23,8 +23,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     }),
     cleanup: vi.fn().mockResolvedValue({ deleted: 0, upgraded: 0 }),
     getUnconsolidatedMemories: vi.fn().mockResolvedValue([]),
-    storeConsolidation: vi.fn().mockResolvedValue(undefined),
-    connect: vi.fn().mockResolvedValue(undefined),
+    storeConsolidation: vi.fn().mockResolvedValue({ requested: 0, created: 0, failures: [] }),
     getBackendType: vi.fn().mockReturnValue('test'),
     ...overrides,
   } as unknown as MemoryAdapter;
@@ -41,6 +40,29 @@ function createApi() {
 }
 
 describe('registerTools', () => {
+  it('forwards an explicit memory name to adapter.store', async () => {
+    const adapter = createAdapter();
+    const api = createApi();
+
+    registerTools(api, adapter, {});
+
+    const result = await api.tools.get('memory_store').execute('tool-name', {
+      content: 'Remember my preferred shell',
+      name: 'shell-preference',
+      tier: 'explicit',
+    });
+
+    expect(adapter.store).toHaveBeenCalledWith(
+      'Remember my preferred shell',
+      expect.objectContaining({
+        tier: 'explicit',
+        source: 'user_explicit',
+        name: 'shell-preference',
+      })
+    );
+    expect(result.details.name).toBe('shell-preference');
+  });
+
   it('clamps the unconsolidated memory limit to a safe maximum', async () => {
     const adapter = createAdapter();
     const api = createApi();
@@ -88,48 +110,66 @@ describe('registerTools', () => {
     expect(adapter.storeConsolidation).toHaveBeenCalledWith(['mem-1'], 'Merged summary', 'Shared pattern', []);
   });
 
-  it('falls back to graph-only mode with a warning when axonSessionLogDir cannot be read', async () => {
-    const adapter = createAdapter({
-      list: vi.fn()
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([]),
-    });
-    const api = createApi();
-
-    registerTools(api, adapter, {
-      axonEnabled: true,
-      axonSessionLogDir: '/definitely/missing/path',
-      axonLookbackHours: 24,
-      axonBatchLimit: 5,
-      axonEphemeralForgetDays: 5,
-      axonMinRepeatCount: 2,
-    });
-
-    const result = await api.tools.get('memory_axon_daily_sources').execute('tool-4', {});
-
-    expect(result.isError).toBeUndefined();
-    expect(result.details.warnings[0]).toContain('falling back to graph-only mode');
-  });
-
-  it('honors axonDryRun when applying Axon plans', async () => {
+  it('rejects blank consolidation summary and malformed connections', async () => {
     const adapter = createAdapter();
     const api = createApi();
 
-    registerTools(api, adapter, {
-      axonEnabled: true,
-      axonDryRun: true,
+    registerTools(api, adapter, {});
+
+    const blankSummary = await api.tools.get('memory_consolidate_batch').execute('tool-4', {
+      sourceIds: ['mem-1'],
+      summary: '   ',
+      insight: 'Shared pattern',
+      connections: [],
     });
 
-    const result = await api.tools.get('memory_axon_apply_plan').execute('tool-5', {
-      operations: [
-        { action: 'store', summary: 'Summary: keep this for tomorrow', tier: 'ephemeral' },
-        { action: 'connect', fromId: 'mem-1', toId: 'mem-2', relationship: 'RELATES_TO' },
+    expect(blankSummary.isError).toBe(true);
+    expect(adapter.storeConsolidation).not.toHaveBeenCalled();
+
+    const badRelationship = await api.tools.get('memory_consolidate_batch').execute('tool-5', {
+      sourceIds: ['mem-1'],
+      summary: 'Merged summary',
+      insight: 'Shared pattern',
+      connections: [{ fromId: 'a', toId: 'b', relationship: 'relates-to' }],
+    });
+
+    expect(badRelationship.isError).toBe(true);
+    expect(adapter.storeConsolidation).not.toHaveBeenCalled();
+  });
+
+  it('reports partial consolidation failures without hiding created edges', async () => {
+    const adapter = createAdapter({
+      storeConsolidation: vi.fn().mockResolvedValue({
+        requested: 2,
+        created: 1,
+        failures: [
+          {
+            fromId: 'mem-1',
+            toId: 'mem-2',
+            relationship: 'RELATES_TO',
+            error: 'edge failed',
+          },
+        ],
+      }),
+    });
+    const api = createApi();
+
+    registerTools(api, adapter, {});
+
+    const result = await api.tools.get('memory_consolidate_batch').execute('tool-6', {
+      sourceIds: ['mem-1'],
+      summary: 'Merged summary',
+      insight: 'Shared pattern',
+      connections: [
+        { fromId: 'mem-1', toId: 'mem-2', relationship: 'RELATES_TO' },
+        { fromId: 'mem-1', toId: 'mem-3', relationship: 'SUPPORTS' },
       ],
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.details.dryRun).toBe(true);
-    expect(adapter.store).not.toHaveBeenCalled();
-    expect(adapter.connect).not.toHaveBeenCalled();
+    expect(result.details.connections).toBe(1);
+    expect(result.details.requestedConnections).toBe(2);
+    expect(result.details.failures).toHaveLength(1);
+    expect(result.details.failureWarning).toContain('failed to persist');
   });
 });
