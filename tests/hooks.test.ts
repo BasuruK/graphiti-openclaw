@@ -12,6 +12,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     forget: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     list: vi.fn().mockResolvedValue([]),
+    getById: vi.fn().mockResolvedValue(null),
     searchByEntity: vi.fn().mockResolvedValue([]),
     searchByTimeRange: vi.fn().mockResolvedValue([]),
     getRelated: vi.fn().mockResolvedValue([]),
@@ -50,11 +51,12 @@ describe('registerHooks', () => {
       scoringEnabled: true,
     });
 
-    const result = await api.handlers.get('before_agent_start')({ prompt: 'What do you remember about my editor setup?' });
+    const beforeAgentStart = api.handlers.get('before_agent_start')!;
+    const result = await beforeAgentStart({ prompt: 'What do you remember about my editor setup?' });
 
-    expect(result.prependContext).toContain('<system_memory_instructions>');
-    expect(result.prependSystemContext).toBe(result.prependContext);
     expect(result.prependContext).toContain('No relevant memories found.');
+    expect(result.prependContext).not.toContain('<system_memory_instructions>');
+    expect(result.prependSystemContext).toContain('<system_memory_instructions>');
   });
 
   it('keeps short explicit user memories for scoring', async () => {
@@ -144,7 +146,8 @@ describe('registerHooks', () => {
       scoringNotifyExplicit: false,
     });
 
-    await api.handlers.get('agent_end')({
+    const agentEnd = api.handlers.get('agent_end')!;
+    await agentEnd({
       sessionId: 'session-1',
       messages: [
         { role: 'user', content: 'Please remember that I prefer Vim keybindings in VS Code for daily development work.' },
@@ -154,8 +157,11 @@ describe('registerHooks', () => {
 
     expect(adapter.store).toHaveBeenCalledTimes(1);
     expect(adapter.store).toHaveBeenCalledWith(
-      expect.stringContaining('user: Please remember that I prefer Vim keybindings'),
+      expect.stringContaining('Preference: I prefer Vim keybindings in VS Code for daily development work.'),
       expect.objectContaining({
+        tier: 'explicit',
+        disposition: 'explicit',
+        memoryKind: 'preference',
         source: 'auto_capture',
         sessionId: 'session-1',
       })
@@ -177,7 +183,8 @@ describe('registerHooks', () => {
       scoringEnabled: true,
     });
 
-    await api.handlers.get('agent_end')({
+    const agentEnd = api.handlers.get('agent_end')!;
+    await agentEnd({
       sessionId: 'session-2',
       messages: [
         { role: 'user', content: 'hello there nice to meet you today' },
@@ -185,5 +192,139 @@ describe('registerHooks', () => {
     });
 
     expect(adapter.store).not.toHaveBeenCalled();
+  });
+
+  it('skips one-off OpenClaw help questions during auto-capture', async () => {
+    const adapter = createAdapter({
+      recall: vi.fn().mockResolvedValue([]),
+      store: vi.fn().mockResolvedValue('memory-42'),
+    });
+    const api = createApi();
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: true,
+      minPromptLength: 1,
+      recallMaxFacts: 3,
+      scoringEnabled: true,
+    });
+
+    const agentEnd = api.handlers.get('agent_end')!;
+    await agentEnd({
+      sessionId: 'session-help',
+      messages: [
+        { role: 'user', content: 'How can I set thinking mode to high in OpenClaw?' },
+        { role: 'assistant', content: 'Open the config and switch the thinking mode option to high.' },
+      ],
+    });
+
+    expect(adapter.store).not.toHaveBeenCalled();
+  });
+
+  it('filters think blocks and assistant filler during auto-capture', async () => {
+    const adapter = createAdapter({
+      recall: vi.fn().mockResolvedValue([]),
+      store: vi.fn().mockResolvedValue('memory-42'),
+    });
+    const api = createApi();
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: true,
+      minPromptLength: 1,
+      recallMaxFacts: 3,
+      scoringEnabled: true,
+      scoringNotifyExplicit: false,
+    });
+
+    const agentEnd = api.handlers.get('agent_end')!;
+    await agentEnd({
+      sessionId: 'session-3',
+      messages: [
+        { role: 'user', content: 'Please remember that we decided to use pnpm for this repo and ship on Friday.' },
+        { role: 'assistant', content: '<think>This is probably important.</think> Great! Sure, I can help with that.' },
+      ],
+    });
+
+    expect(adapter.store).toHaveBeenCalledTimes(1);
+    expect(adapter.store).toHaveBeenCalledWith(
+      expect.not.stringContaining('<think>'),
+      expect.anything()
+    );
+    expect(adapter.store).toHaveBeenCalledWith(
+      expect.not.stringContaining('Great! Sure, I can help with that.'),
+      expect.anything()
+    );
+  });
+
+  it('removes unterminated think blocks before auto-capture storage', async () => {
+    const adapter = createAdapter({
+      recall: vi.fn().mockResolvedValue([]),
+      store: vi.fn().mockResolvedValue('memory-42'),
+    });
+    const api = createApi();
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: true,
+      minPromptLength: 1,
+      recallMaxFacts: 3,
+      scoringEnabled: true,
+      scoringNotifyExplicit: false,
+    });
+
+    const agentEnd = api.handlers.get('agent_end')!;
+    await agentEnd({
+      sessionId: 'session-4',
+      messages: [
+        { role: 'user', content: 'Please remember that the repo uses pnpm and the release is planned for Friday afternoon.' },
+        { role: 'assistant', content: '<think confidence="0.1">private reasoning that should never be persisted' },
+      ],
+    });
+
+    expect(adapter.store).toHaveBeenCalledTimes(1);
+    expect(adapter.store).toHaveBeenCalledWith(
+      expect.not.stringContaining('private reasoning that should never be persisted'),
+      expect.anything()
+    );
+  });
+
+  it('stores distilled user-led summaries instead of raw assistant turn text', async () => {
+    const adapter = createAdapter({
+      recall: vi.fn().mockResolvedValue([]),
+      store: vi.fn().mockResolvedValue('memory-42'),
+    });
+    const api = createApi();
+
+    registerHooks(api, adapter, {
+      autoRecall: false,
+      autoCapture: true,
+      minPromptLength: 1,
+      recallMaxFacts: 3,
+      scoringEnabled: true,
+      scoringNotifyExplicit: false,
+    });
+
+    const agentEnd = api.handlers.get('agent_end')!;
+    await agentEnd({
+      sessionId: 'session-5',
+      messages: [
+        { role: 'user', content: 'Please remember that we decided to use pnpm for this repo and ship on Friday.' },
+        { role: 'assistant', content: "Here's the plan: use pnpm for installs and target Friday for the release cut." },
+      ],
+    });
+
+    expect(adapter.store).toHaveBeenCalledTimes(1);
+    expect(adapter.store).toHaveBeenCalledWith(
+      expect.stringContaining('Decision: we decided to use pnpm for this repo and ship on Friday.'),
+      expect.objectContaining({
+        memoryKind: 'decision',
+        tier: 'explicit',
+      })
+    );
+    expect(adapter.store).toHaveBeenCalledWith(
+      expect.not.stringContaining("Here's the plan: use pnpm for installs and target Friday for the release cut."),
+      expect.anything()
+    );
   });
 });

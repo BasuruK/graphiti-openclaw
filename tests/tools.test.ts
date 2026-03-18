@@ -12,6 +12,7 @@ function createAdapter(overrides: Partial<MemoryAdapter> = {}): MemoryAdapter {
     forget: vi.fn().mockResolvedValue(undefined),
     update: vi.fn().mockResolvedValue(undefined),
     list: vi.fn().mockResolvedValue([]),
+    getById: vi.fn().mockResolvedValue(null),
     searchByEntity: vi.fn().mockResolvedValue([]),
     searchByTimeRange: vi.fn().mockResolvedValue([]),
     getRelated: vi.fn().mockResolvedValue([]),
@@ -60,6 +61,27 @@ describe('registerTools', () => {
       })
     );
     expect(result.details.name).toBe('shell-preference');
+  });
+
+  it('accepts and returns a normalized memory kind for memory_store', async () => {
+    const adapter = createAdapter();
+    const api = createApi();
+
+    registerTools(api, adapter, {});
+
+    const result = await api.tools.get('memory_store').execute('tool-kind', {
+      content: 'I prefer PowerShell for local automation.',
+      memoryKind: 'Preference',
+      tier: 'explicit',
+    });
+
+    expect(adapter.store).toHaveBeenCalledWith(
+      'I prefer PowerShell for local automation.',
+      expect.objectContaining({
+        memoryKind: 'preference',
+      })
+    );
+    expect(result.details.memoryKind).toBe('preference');
   });
 
   it('clamps the unconsolidated memory limit to a safe maximum', async () => {

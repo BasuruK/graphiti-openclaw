@@ -7,17 +7,36 @@
  * - memory_list: Browse memories with filters
  * - memory_forget: Delete a memory
  * - memory_status: Check system health
+ * - memory_axon_daily_sources: Gather same-day graph + session-log inputs for Axon
+ * - memory_axon_apply_plan: Apply Axon maintenance operations through the adapter
  * - read_unconsolidated_memories: Fetch raw memories for Axon synthesis
  * - memory_consolidate_batch: Store Axon synthesis findings
  * - memory_analyze: Score/assess a memory's importance
  */
 
 import { Type } from '@sinclair/typebox';
-import type { ConsolidationConnection, MemoryAdapter } from './adapters/memory-adapter.js';
+import type { ConsolidationConnection, MemoryAdapter, MemoryKind } from './adapters/memory-adapter.js';
+import { applyAxonPlan, collectAxonDailySources, type AxonPlanOperation, type AxonRuntimeConfig } from './axon.js';
+import { getLogger } from './logger.js';
+import { reinforceMemories } from './memory-maintenance.js';
+
+const logger = getLogger('tools');
 
 /** Valid memory tier values */
 const VALID_TIERS = ['explicit', 'silent', 'ephemeral', 'all'] as const;
 type MemoryTier = typeof VALID_TIERS[number];
+const VALID_MEMORY_KINDS = ['preference', 'decision', 'task', 'fact', 'working_context', 'question', 'summary', 'insight', 'other'] as const;
+
+const TOOL_SOURCE = 'Source: Nuron OpenClaw plugin.';
+const BACKEND_PATH = 'Backend path for storage and recall operations: Nuron tool -> Graphiti MCP server -> Neo4j temporal knowledge graph.';
+
+function describeTool(purpose: string, inputs: string, returns: string): string {
+  return `${purpose} ${TOOL_SOURCE} Inputs: ${inputs} Returns: ${returns}`;
+}
+
+function describeBackendTool(purpose: string, inputs: string, returns: string): string {
+  return `${purpose} ${TOOL_SOURCE} ${BACKEND_PATH} Inputs: ${inputs} Returns: ${returns}`;
+}
 
 /**
  * Validate and normalize a tier string to a valid MemoryTier.
@@ -27,6 +46,55 @@ function normalizeTier(tier: string | undefined, defaultTier: MemoryTier = 'all'
   if (!tier) return defaultTier;
   const lower = tier.toLowerCase();
   return (VALID_TIERS as readonly string[]).includes(lower) ? lower as MemoryTier : defaultTier;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function normalizeMemoryKind(memoryKind: string | undefined): MemoryKind | undefined {
+  if (!memoryKind) return undefined;
+  const normalized = memoryKind.trim().toLowerCase().replace(/\s+/g, '_');
+  return (VALID_MEMORY_KINDS as readonly string[]).includes(normalized) ? normalized as MemoryKind : undefined;
+}
+
+function inferMemoryKind(content: string): MemoryKind {
+  const normalized = content.toLowerCase();
+
+  if (/\b(i prefer|i like|my preference|preferred|always use|prefer to use)\b/.test(normalized)) {
+    return 'preference';
+  }
+  if (/\b(decided|decision|we agreed|we will|we'll|ship on|chosen)\b/.test(normalized)) {
+    return 'decision';
+  }
+  if (/\b(todo|to do|need to|follow up|task|next step|action item)\b/.test(normalized)) {
+    return 'task';
+  }
+  if (/\?$/.test(content.trim())) {
+    return 'question';
+  }
+
+  return 'fact';
+}
+
+function resolveAxonRuntimeConfig(
+  config: any,
+  overrides: { lookbackHours?: number; limit?: number } = {}
+): AxonRuntimeConfig {
+  return {
+    axonEnabled: config.axonEnabled !== false,
+    axonSessionLogDir: typeof config.axonSessionLogDir === 'string' ? config.axonSessionLogDir : '',
+    axonLookbackHours: clamp(
+      overrides.lookbackHours ?? config.axonLookbackHours ?? 24,
+      1,
+      168
+    ),
+    axonEphemeralForgetDays: clamp(config.axonEphemeralForgetDays ?? 5, 1, 365),
+    axonSilentDecayDays: clamp(config.axonSilentDecayDays ?? 30, 1, 365),
+    axonBatchLimit: clamp(overrides.limit ?? config.axonBatchLimit ?? 20, 1, 100),
+    axonMinRepeatCount: clamp(config.axonMinRepeatCount ?? 2, 1, 20),
+    axonDryRun: config.axonDryRun === true,
+  };
 }
 
 /**
@@ -40,12 +108,16 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Recall - Search memories
   api.registerTool({
     name: 'memory_recall',
-    label: 'Memory Recall',
-    description: 'Search through long-term memories. Use when user asks about past conversations, preferences, facts, or context from previous sessions.',
+    label: 'Nuron Memory Recall',
+    description: describeBackendTool(
+      'Search long-term memory for past conversations, preferences, facts, and prior session context.',
+      'query string, optional result limit, optional tier filter.',
+      'A formatted memory list and structured recall results with memory metadata.'
+    ),
     parameters: Type.Object({
-      query: Type.String({ description: 'Search query' }),
-      limit: Type.Optional(Type.Number({ default: 5, description: 'Maximum results' })),
-      tier: Type.Optional(Type.String({ description: 'Filter by tier: explicit, silent, ephemeral, or all', default: 'all' }))
+      query: Type.String({ description: 'Natural-language search query sent to Nuron recall over Graphiti MCP.' }),
+      limit: Type.Optional(Type.Number({ default: 5, description: 'Maximum number of memory results to return.' })),
+      tier: Type.Optional(Type.String({ description: 'Optional tier filter: explicit, silent, ephemeral, or all.', default: 'all' }))
     }),
     async execute(toolCallId: string, params: { query: string; limit?: number; tier?: string }) {
       try {
@@ -61,6 +133,12 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
             content: [{ type: 'text', text: 'No memories found.' }],
             details: { count: 0 }
           };
+        }
+
+        try {
+          await reinforceMemories(adapter, results);
+        } catch (err) {
+          logger.debug(`memory_recall reinforcement skipped: ${err instanceof Error ? err.message : String(err)}`);
         }
 
         const formatted = results.map((r, i) =>
@@ -84,29 +162,38 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Store - Store important info
   api.registerTool({
     name: 'memory_store',
-    label: 'Memory Store',
-    description: 'Store important information to remember long-term. Use when user says "remember that", "dont forget", or shares preferences, important facts, or context.',
+    label: 'Nuron Memory Store',
+    description: describeBackendTool(
+      'Store information into long-term memory when the user shares durable preferences, facts, or explicit reminders.',
+      'memory content, optional display name, optional storage tier.',
+      'A confirmation with the stored memory ID and chosen tier.'
+    ),
     parameters: Type.Object({
-      content: Type.String({ description: 'Content to remember' }),
-      name: Type.Optional(Type.String({ description: 'Optional name for this memory' })),
-      tier: Type.Optional(Type.String({ description: 'Memory tier: explicit (permanent), silent (30d), ephemeral (72h)', default: 'silent' }))
+      content: Type.String({ description: 'The fact, preference, or reminder to persist through Nuron.' }),
+      name: Type.Optional(Type.String({ description: 'Optional human-friendly name for this memory.' })),
+      memoryKind: Type.Optional(Type.String({ description: 'Optional memory kind: preference, decision, task, fact, working_context, question, summary, insight, or other.' })),
+      tier: Type.Optional(Type.String({ description: 'Optional storage tier: explicit (permanent), silent (30d), or ephemeral (72h).', default: 'silent' }))
     }),
-    async execute(toolCallId: string, params: { content: string; name?: string; tier?: string }) {
+    async execute(toolCallId: string, params: { content: string; name?: string; tier?: string; memoryKind?: string }) {
       try {
         const tier = normalizeTier(params.tier, 'silent');
         // Exclude 'all' — it's only valid for queries, not storage
         const storageTier = tier === 'all' ? 'silent' : tier;
+        const resolvedMemoryKind = normalizeMemoryKind(params.memoryKind) ?? inferMemoryKind(params.content);
 
         const id = await adapter.store(params.content, {
           tier: storageTier,
           score: storageTier === 'explicit' ? 9 : storageTier === 'silent' ? 6 : 3,
           source: 'user_explicit',
+          disposition: storageTier,
+          summary: params.content,
+          memoryKind: resolvedMemoryKind,
           name: params.name,
         });
 
         return {
           content: [{ type: 'text', text: `Memory stored successfully (ID: ${id})\nTier: ${storageTier}${params.name ? `\nName: ${params.name}` : ''}` }],
-          details: { id, tier: storageTier, name: params.name }
+          details: { id, tier: storageTier, name: params.name, memoryKind: resolvedMemoryKind }
         };
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -121,11 +208,15 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory List - Browse memories with filters
   api.registerTool({
     name: 'memory_list',
-    label: 'Memory List',
-    description: 'List recent memories with optional filtering by tier. Useful for browsing what has been stored.',
+    label: 'Nuron Memory List',
+    description: describeBackendTool(
+      'Browse recently stored Nuron memories, optionally filtered by memory tier.',
+      'optional result limit and optional tier filter.',
+      'A formatted list of recent memories and structured memory objects.'
+    ),
     parameters: Type.Object({
-      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum memories to list' })),
-      tier: Type.Optional(Type.String({ description: 'Filter by tier: explicit, silent, ephemeral, or all', default: 'all' }))
+      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum number of memories to return.' })),
+      tier: Type.Optional(Type.String({ description: 'Optional tier filter: explicit, silent, ephemeral, or all.', default: 'all' }))
     }),
     async execute(toolCallId: string, params: { limit?: number; tier?: string }) {
       try {
@@ -164,10 +255,14 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Forget - Delete a memory
   api.registerTool({
     name: 'memory_forget',
-    label: 'Memory Forget',
-    description: 'Delete a specific memory by ID. Use when user wants to remove incorrect or outdated information.',
+    label: 'Nuron Memory Forget',
+    description: describeBackendTool(
+      'Delete a specific Nuron memory when stored information is incorrect, outdated, or should be removed.',
+      'the target memory UUID.',
+      'A deletion confirmation or an error if the memory cannot be removed.'
+    ),
     parameters: Type.Object({
-      uuid: Type.String({ description: 'UUID of the memory to delete' })
+      uuid: Type.String({ description: 'UUID of the Nuron memory to delete.' })
     }),
     async execute(toolCallId: string, params: { uuid: string }) {
       try {
@@ -190,10 +285,14 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Status - Check health
   api.registerTool({
     name: 'memory_status',
-    label: 'Memory Status',
-    description: 'Check the health and status of the memory system.',
+    label: 'Nuron Memory Status',
+    description: describeBackendTool(
+      'Check Nuron memory system health, backend connectivity, and high-level memory counts.',
+      'no parameters.',
+      'Backend health, storage statistics, and tier counts.'
+    ),
     parameters: Type.Object({}),
-    async execute(toolCallId: string, params: {}) {
+    async execute(_toolCallId: string, _params: {}) {
       try {
         const health = await adapter.healthCheck();
         const stats = await adapter.getStats();
@@ -225,13 +324,149 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }
   }, { name: 'memory_status' });
 
-  // Read Unconsolidated Memories - For Axon Agent
+  // Axon Daily Sources - Gather same-day graph/session inputs
+  api.registerTool({
+    name: 'memory_axon_daily_sources',
+    label: 'Nuron Axon Daily Sources',
+    description: describeBackendTool(
+      'Gather today-focused Axon inputs: recent graph memories, stale ephemeral candidates, and optional OpenClaw Markdown session-log excerpts.',
+      'optional lookback hours override and optional result limit override.',
+      'Structured daily Axon source data plus warnings when session logs are unavailable.'
+    ),
+    parameters: Type.Object({
+      lookbackHours: Type.Optional(Type.Number({ default: 24, description: 'How many hours of recent activity Axon should inspect.' })),
+      limit: Type.Optional(Type.Number({ default: 20, description: 'Maximum items per source group.' }))
+    }),
+    async execute(toolCallId: string, params: { lookbackHours?: number; limit?: number }) {
+      try {
+        const runtimeConfig = resolveAxonRuntimeConfig(config, {
+          lookbackHours: params.lookbackHours,
+          limit: params.limit,
+        });
+
+        const sources = await collectAxonDailySources(adapter, runtimeConfig);
+        const warningBlock = sources.warnings.length > 0
+          ? `Warnings:\n${sources.warnings.map((warning) => `- ${warning}`).join('\n')}\n\n`
+          : '';
+        const sessionLogBlock = sources.sessionLogExcerpts.length > 0
+          ? sources.sessionLogExcerpts.map((excerpt, index) =>
+              `${index + 1}. ${excerpt.path}\n${excerpt.excerpt}`
+            ).join('\n\n')
+          : 'No recent session-log excerpts.';
+        const graphBlock = sources.graphMemories.length > 0
+          ? sources.graphMemories.map((memory, index) =>
+              `${index + 1}. [${memory.metadata.tier.toUpperCase()}] ${memory.content.substring(0, 140)}`
+            ).join('\n')
+          : 'No recent graph memories.';
+        const staleBlock = sources.staleEphemeralCandidates.length > 0
+          ? sources.staleEphemeralCandidates.map((memory, index) =>
+              `${index + 1}. ${memory.id} - ${memory.content.substring(0, 120)}`
+            ).join('\n')
+          : 'No stale ephemeral candidates.';
+
+        return {
+          content: [{
+            type: 'text',
+            text:
+              `${warningBlock}` +
+              `Axon Daily Sources (lookback ${sources.lookbackHours}h)\n\n` +
+              `Session Log Excerpts:\n${sessionLogBlock}\n\n` +
+              `Recent Graph Memories:\n${graphBlock}\n\n` +
+              `Stale Ephemeral Candidates:\n${staleBlock}`
+          }],
+          details: sources
+        };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error collecting Axon daily sources: ${errorMsg}` }],
+          isError: true
+        };
+      }
+    }
+  }, { name: 'memory_axon_daily_sources' });
+
+  // Axon Apply Plan - Apply Graphiti-first maintenance actions
+  api.registerTool({
+    name: 'memory_axon_apply_plan',
+    label: 'Nuron Axon Apply Plan',
+    description: describeBackendTool(
+      'Apply Axon maintenance operations such as store, promote, reinforce, connect, merge, and prune using the Nuron adapter.',
+      'one or more Axon plan operations.',
+      'Per-operation execution outcomes. Honors axonDryRun from plugin config.'
+    ),
+    parameters: Type.Object({
+      operations: Type.Array(Type.Object({
+        action: Type.String({ description: 'store, promote, reinforce, connect, merge, or prune.' }),
+        id: Type.Optional(Type.String()),
+        ids: Type.Optional(Type.Array(Type.String())),
+        sourceIds: Type.Optional(Type.Array(Type.String())),
+        tier: Type.Optional(Type.String()),
+        content: Type.Optional(Type.String()),
+        summary: Type.Optional(Type.String()),
+        insight: Type.Optional(Type.String()),
+        memoryKind: Type.Optional(Type.String()),
+        score: Type.Optional(Type.Number()),
+        fromId: Type.Optional(Type.String()),
+        toId: Type.Optional(Type.String()),
+        relationship: Type.Optional(Type.String()),
+        connections: Type.Optional(Type.Array(Type.Object({
+          fromId: Type.String(),
+          toId: Type.String(),
+          relationship: Type.String()
+        }))),
+        consolidated: Type.Optional(Type.Boolean()),
+        sourceLogPath: Type.Optional(Type.String()),
+        sourceLogDate: Type.Optional(Type.String()),
+        sourceLogExcerpt: Type.Optional(Type.String()),
+      }), {
+        minItems: 1,
+        description: 'Axon plan operations to execute sequentially.'
+      })
+    }),
+    async execute(toolCallId: string, params: { operations: AxonPlanOperation[] }) {
+      try {
+        if (!Array.isArray(params.operations) || params.operations.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'Error: operations must contain at least one Axon action.' }],
+            isError: true
+          };
+        }
+
+        const runtimeConfig = resolveAxonRuntimeConfig(config);
+        const result = await applyAxonPlan(adapter, params.operations, runtimeConfig);
+        const formatted = result.outcomes.map((outcome, index) =>
+          `${index + 1}. [${outcome.status.toUpperCase()}] ${outcome.action}: ${outcome.detail}`
+        ).join('\n');
+
+        return {
+          content: [{
+            type: 'text',
+            text: `Axon Plan ${result.dryRun ? '(dry run)' : 'Execution'}:\n\n${formatted}`
+          }],
+          details: result
+        };
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text', text: `Error applying Axon plan: ${errorMsg}` }],
+          isError: true
+        };
+      }
+    }
+  }, { name: 'memory_axon_apply_plan' });
+
+  // Read Unconsolidated Memories - Legacy Axon synthesis path
   api.registerTool({
     name: 'read_unconsolidated_memories',
-    label: 'Read Unconsolidated Memories',
-    description: 'Fetch a batch of raw, unconsolidated memories that need to be synthesized by the Axon agent.',
+    label: 'Nuron Read Unconsolidated Memories',
+    description: describeBackendTool(
+      'Fetch raw Nuron memories that have not yet been consolidated. Legacy Axon synthesis path; prefer memory_axon_daily_sources for daily hygiene.',
+      'optional batch size limit.',
+      'A batch of unconsolidated memory records ready for synthesis.'
+    ),
     parameters: Type.Object({
-      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum memories to fetch' }))
+      limit: Type.Optional(Type.Number({ default: 10, description: 'Maximum number of unconsolidated memories to fetch.' }))
     }),
     async execute(toolCallId: string, params: { limit?: number }) {
       try {
@@ -246,12 +481,12 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
           };
         }
 
-        const formatted = memories.map((m, i) =>
+        const formatted = memories.map((m) =>
           `ID: ${m.id} | Date: ${m.metadata.createdAt.toISOString().split('T')[0]}\nContent: ${m.content}`
         ).join('\n\n');
 
         return {
-          content: [{ type: 'text', text: `Unconsolidated Memories to Synthesize:\n\n${formatted}` }],
+          content: [{ type: 'text', text: `Deprecated: prefer memory_axon_daily_sources for daily Axon runs.\n\nUnconsolidated Memories to Synthesize:\n\n${formatted}` }],
           details: { count: memories.length, memories }
         };
       } catch (err) {
@@ -267,19 +502,23 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Consolidate Batch - For Axon Agent to commit synthesis
   api.registerTool({
     name: 'memory_consolidate_batch',
-    label: 'Memory Consolidate Batch',
-    description: 'Store the results of a memory synthesis cycle. Marks source memories as consolidated, creates an insight, and writes semantic graph connections.',
+    label: 'Nuron Memory Consolidate Batch',
+    description: describeBackendTool(
+      'Commit the result of a legacy Axon synthesis cycle by creating an insight, writing graph connections, and marking source memories as consolidated. Prefer memory_axon_apply_plan for VNext.',
+      'source memory IDs, a summary, one synthesized insight, and semantic connections.',
+      'A consolidation confirmation with processed source count and connection count.'
+    ),
     parameters: Type.Object({
-      sourceIds: Type.Array(Type.String(), { description: 'IDs of the memories that were synthesized' }),
-      summary: Type.String({ description: 'A synthesized summary combining the key facts' }),
-      insight: Type.String({ description: 'ONE key overarching insight or hidden pattern found' }),
+      sourceIds: Type.Array(Type.String(), { description: 'IDs of the source memories that were synthesized into one insight.' }),
+      summary: Type.String({ description: 'Synthesized summary combining the source memories.' }),
+      insight: Type.String({ description: 'One overarching insight or hidden pattern extracted from the source memories.' }),
       connections: Type.Array(
         Type.Object({
           fromId: Type.String(),
           toId: Type.String(),
-          relationship: Type.String({ description: 'Capitalized verb (e.g., RELATES_TO, CONTRADICTS)' })
+          relationship: Type.String({ description: 'Capitalized edge label such as RELATES_TO or CONTRADICTS.' })
         }),
-        { description: 'Semantic connections between the memories' }
+        { description: 'Semantic graph connections to write between the memories.' }
       )
     }),
     async execute(toolCallId: string, params: {
@@ -378,16 +617,19 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
   // Memory Analyze - Score/assess a memory's importance
   api.registerTool({
     name: 'memory_analyze',
-    label: 'Memory Analyze',
-    description: 'Analyze content to predict its importance score (0-10) and recommended storage tier.',
+    label: 'Nuron Memory Analyze',
+    description: describeTool(
+      'Analyze candidate memory content and estimate its importance score and recommended storage tier before saving.',
+      'one content string to analyze.',
+      'A predicted importance score, recommended tier, and analysis rationale.'
+    ),
     parameters: Type.Object({
-      content: Type.String({ description: 'Content to analyze' })
+      content: Type.String({ description: 'Candidate memory content to score and classify.' })
     }),
     async execute(toolCallId: string, params: { content: string }) {
       try {
         // Import dynamically to avoid circular deps
         const { createMemoryScorer } = await import('./memory-scorer.js');
-        const { DEFAULT_SCORING_CONFIG } = await import('./memory-scorer.js');
 
         const scorer = createMemoryScorer(adapter, {
           enabled: true,
@@ -410,6 +652,9 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
             text: `Memory Analysis:\n\n` +
               `- Score: ${result.score}/10 ${tierEmoji[result.tier]}\n` +
               `- Tier: ${result.tier}\n` +
+              `- Disposition: ${result.disposition}\n` +
+              `- Memory Kind: ${result.memoryKind}\n` +
+              `- Summary: ${result.summary}\n` +
               `- Reasoning: ${result.reasoning}\n` +
               `- Recommended Action: ${result.recommendedAction}`
           }],
@@ -425,5 +670,5 @@ export function registerTools(api: any, adapter: MemoryAdapter, config: any) {
     }
   }, { name: 'memory_analyze' });
 
-  console.log('[nuron] Tools registered: memory_recall, memory_store, memory_list, memory_forget, memory_status, read_unconsolidated_memories, memory_consolidate_batch, memory_analyze');
+  logger.info('Registered memory tools.');
 }

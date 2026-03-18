@@ -10,7 +10,9 @@ This is a research-driven project. The current package is intended to be a worka
 - Memory tools for recall, store, list, forget, status, analysis, and consolidation plumbing.
 - Auto-recall hook that injects relevant memories and the Nuron memory policy before agent turns.
 - Auto-capture hook that scores conversations and stores them through the plugin.
+- Clean capture summaries with skip/ephemeral/silent/explicit dispositions.
 - Tiered memory classification: `explicit`, `silent`, `ephemeral`.
+- Axon daily-memory tools for same-day source gathering and Graphiti-first maintenance plans.
 
 ## What Is Still Limited
 
@@ -41,14 +43,30 @@ plugins:
       enabled: true
       config:
         backend: "graphiti-mcp"
-        transport: "sse"
-        endpoint: "http://localhost:8000/sse"
+        transport: "http"
+        endpoint: "http://localhost:8000/mcp/"
         groupId: "default"
         autoRecall: true
         autoCapture: true
         scoringEnabled: true
         axonDispatchEnabled: false
+        axonEnabled: true
+        axonLookbackHours: 24
+        axonEphemeralForgetDays: 5
+        axonBatchLimit: 20
 ```
+
+## Axon via OpenClaw Cron
+
+Axon scheduling belongs in OpenClaw cron, not Nuron plugin config.
+Use an isolated background job that:
+
+1. calls `memory_axon_daily_sources`
+2. plans daily store/promote/reinforce/connect/merge/prune operations
+3. commits them with `memory_axon_apply_plan`
+
+Set `axonSessionLogDir` if you want Axon to inspect OpenClaw's daily Markdown logs.
+If that path is empty or unavailable, Axon falls back to graph-only mode with a warning.
 
 ## Development
 
